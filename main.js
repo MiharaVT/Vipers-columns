@@ -339,17 +339,40 @@ function bdndAttachColumnZotionCompat(ctx) {
         const md = ta.value ?? '';
         while (previewEl.firstChild) previewEl.firstChild.remove();
         removeOverlay();
+
+        // Wiki embeds inside column code-block widgets often render blank via
+        // MarkdownRenderer. Draw image-only bodies (and image fallbacks) directly.
+        if (bodyLooksLikeImageOnly(md)) {
+            const n = bdndRenderWikiImagesDirect(app, md, previewEl, sourcePath);
+            if (n === 0) {
+                const dv = document.createElement('div');
+                dv.className = 'block-dnd-col-preview-fallback';
+                dv.textContent = md.trim() || '[Image unavailable]';
+                previewEl.appendChild(dv);
+            }
+            if (typeof refreshRows === 'function') refreshRows();
+            updateOverlayRect();
+            return;
+        }
+
         try {
             if (typeof obsidian.MarkdownRenderer.render === 'function') {
                 await obsidian.MarkdownRenderer.render(app, md, previewEl, sourcePath, markdownChild);
             } else {
                 await obsidian.MarkdownRenderer.renderMarkdown(md, previewEl, sourcePath, markdownChild);
             }
+            // If renderer left embeds empty, paint wiki images ourselves.
+            const hasImg = previewEl.querySelector('img');
+            if (!hasImg && new RegExp(BDND_WIKI_EMBED_RE_SOURCE).test(md)) {
+                bdndRenderWikiImagesDirect(app, md, previewEl, sourcePath);
+            }
         } catch {
-            const doc = previewEl.ownerDocument ?? document;
-            const dv = doc.createElement('div');
-            dv.textContent = '[Preview unavailable]';
-            previewEl.appendChild(dv);
+            if (bdndRenderWikiImagesDirect(app, md, previewEl, sourcePath) === 0) {
+                const dv = document.createElement('div');
+                dv.className = 'block-dnd-col-preview-fallback';
+                dv.textContent = '[Preview unavailable]';
+                previewEl.appendChild(dv);
+            }
         }
         if (typeof refreshRows === 'function') refreshRows();
         updateOverlayRect();
@@ -579,13 +602,20 @@ function bdndAttachColumnZotionCompat(ctx) {
 function isWikiImageLine(text) {
     const t = (text || '').trim();
     if (!t) return false;
-    return /^!\[\[.+\]\]$/.test(t) || /^!\[.*\]\([^)]+\)$/.test(t);
+    if (/^!\[.*\]\([^)]+\)$/.test(t)) return true;
+    try {
+        const re = new RegExp('^(?:' + BDND_WIKI_EMBED_RE_SOURCE + ')$');
+        return re.test(t);
+    } catch {
+        return /^!\[\[.+\]\]$/.test(t);
+    }
 }
 
 function isSimpleSideParagraphLine(text) {
     const t = (text || '').trim();
     if (!t) return false;
     if (isWikiImageLine(t)) return false;
+    if (new RegExp(BDND_WIKI_EMBED_RE_SOURCE).test(t)) return false;
     if (
         t.startsWith('```') ||
         t.startsWith('#') ||
@@ -602,21 +632,34 @@ function isSimpleSideParagraphLine(text) {
     return true;
 }
 
+/** If a line mixes text + a wiki image, split them so they never mash into one cell. */
+function splitMixedImageText(text) {
+    const raw = text || '';
+    const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+    const m = re.exec(raw);
+    if (!m) return null;
+    const hit = bdndWikiMatchFromExec(m);
+    const before = raw.slice(0, hit.fullFrom).trim();
+    const after = raw.slice(hit.fullTo).trim();
+    const sideText = [before, after].filter(Boolean).join(' ');
+    return { imageMd: hit.raw, sideText };
+}
+
 /**
- * Walk forward or backward from a line, skipping at most one blank line,
+ * Walk forward or backward from a line, skipping up to two blank lines,
  * and return the first matching line via `matchFn`.
  */
 function findAdjacentMatchingLine(doc, fromLine0, direction, matchFn) {
     const step = direction === 'before' ? -1 : 1;
     let line0 = fromLine0 + step;
-    let skippedBlank = false;
+    let skippedBlank = 0;
     while (line0 >= 0 && line0 < doc.lines) {
         const line = doc.line(line0 + 1);
         const raw = line.text;
         const t = raw.trim();
         if (!t) {
-            if (skippedBlank) return null;
-            skippedBlank = true;
+            skippedBlank++;
+            if (skippedBlank > 2) return null;
             line0 += step;
             continue;
         }
@@ -628,13 +671,27 @@ function findAdjacentMatchingLine(doc, fromLine0, direction, matchFn) {
 
 /**
  * Build a half-width (image | text) pair for "1 Column".
- * Handles cursor on the image (text below) or on the text (image above).
+ * Handles cursor on the image (text below), on the text (image above),
+ * or a single line that already mixes both.
  */
 function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
     const startLine = doc.line(blockStartLine0 + 1);
     const endLine = doc.line(blockEndLine0 + 1);
     const selected = doc.sliceString(startLine.from, endLine.to);
     const selectedTrim = selected.trim();
+
+    // Same line already mixes text + image — never keep them concatenated.
+    const mixed = splitMixedImageText(selectedTrim);
+    if (mixed && (mixed.sideText || selectedTrim !== mixed.imageMd)) {
+        if (mixed.sideText) {
+            return {
+                left: mixed.imageMd,
+                right: mixed.sideText,
+                from: startLine.from,
+                to: endLine.to,
+            };
+        }
+    }
 
     // Cursor/block is an image (or embed line): pull following text into the right slot.
     if (isWikiImageLine(selectedTrim)) {
@@ -658,7 +715,6 @@ function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
                 to: endLine.to,
             };
         }
-        // No image above — keep text on the left with an empty right slot.
         const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
         return {
             left: selectedTrim,
@@ -666,6 +722,26 @@ function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
             from: startLine.from,
             to: side ? side.line.to : endLine.to,
         };
+    }
+
+    // Selection may be multi-line (image + text). Split the first embed from the rest.
+    {
+        const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+        const m = re.exec(selected);
+        if (m) {
+            const hit = bdndWikiMatchFromExec(m);
+            const sideText = (selected.slice(0, hit.fullFrom) + selected.slice(hit.fullTo))
+                .split('\n')
+                .map((l) => l.trim())
+                .filter(Boolean)
+                .join('\n');
+            return {
+                left: hit.raw,
+                right: sideText,
+                from: startLine.from,
+                to: endLine.to,
+            };
+        }
     }
 
     // Fallback: selected block on the left; following simple paragraph on the right.
@@ -680,7 +756,48 @@ function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
 
 function bodyLooksLikeImageOnly(body) {
     const lines = (body || '').split('\n').map((l) => l.trim()).filter(Boolean);
-    return lines.length > 0 && lines.every(isWikiImageLine);
+    if (!lines.length) return false;
+    if (lines.every(isWikiImageLine)) return true;
+    // A single wiki embed anywhere with no other non-empty prose
+    const embeds = (body || '').match(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g')) || [];
+    if (embeds.length === 0) return false;
+    const without = (body || '').replace(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g'), '').trim();
+    return without.length === 0;
+}
+
+/**
+ * Render wiki image embeds with vault resource URLs.
+ * MarkdownRenderer often leaves column-cell embeds blank in Live Preview.
+ */
+function bdndRenderWikiImagesDirect(app, md, el, sourcePath) {
+    const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g');
+    let match;
+    let rendered = 0;
+    while ((match = re.exec(md || '')) !== null) {
+        const hit = bdndWikiMatchFromExec(match);
+        const dest = app.metadataCache.getFirstLinkpathDest(hit.linkPathRaw, sourcePath || '');
+        if (!(dest instanceof obsidian.TFile) || !bdndIsPreviewImageExt(dest.extension)) {
+            continue;
+        }
+        const img = document.createElement('img');
+        img.className = 'block-dnd-col-direct-img';
+        img.alt = dest.basename;
+        img.draggable = false;
+        try {
+            img.src = app.vault.getResourcePath(dest);
+        } catch {
+            continue;
+        }
+        if (hit.width && hit.width > 0) img.style.width = `${hit.width}px`;
+        if (hit.height && hit.height > 0) img.style.height = `${hit.height}px`;
+        else img.style.height = 'auto';
+        img.style.maxWidth = '100%';
+        img.style.display = 'block';
+        img.style.position = 'relative';
+        el.appendChild(img);
+        rendered++;
+    }
+    return rendered;
 }
 
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
@@ -1089,17 +1206,23 @@ class BlockDndPlugin extends obsidian.Plugin {
 
             /* Keep embeds inside the column — do not let them drop below the row */
             .block-dnd-columns-root .block-dnd-col-preview img,
+            .block-dnd-columns-root .block-dnd-col-preview .block-dnd-col-direct-img,
             .block-dnd-columns-root .block-dnd-col-preview .internal-embed,
             .block-dnd-columns-root .block-dnd-col-preview .image-embed,
             .block-dnd-columns-root .block-dnd-col-preview .media-embed {
                 display: block !important;
                 position: relative !important;
-                width: 100% !important;
+                width: auto !important;
                 max-width: 100% !important;
                 height: auto !important;
                 margin: 0 !important;
                 float: none !important;
                 vertical-align: top;
+            }
+
+            .block-dnd-col-editor-wrap.image-preview-cell .block-dnd-col-preview {
+                cursor: default;
+                min-height: 0;
             }
 
             .block-dnd-col-editor-wrap:not(.is-editing):not(.always-show-editor) .block-dnd-col-editor {
@@ -2250,7 +2373,21 @@ class BlockDndPlugin extends obsidian.Plugin {
             const pair = resolveOneColumnPair(doc, blockStartLine, blockEndLine);
             from = pair.from;
             to = pair.to;
-            bodies = [pair.left, pair.right];
+            let leftBody = pair.left;
+            let rightBody = pair.right;
+            // Safety: if text slot still contains a wiki image, peel it out so the
+            // picture does not vanish into the raw text box (see user report).
+            const rightMixed = splitMixedImageText(rightBody);
+            if (rightMixed?.imageMd) {
+                if (!bodyLooksLikeImageOnly(leftBody)) leftBody = rightMixed.imageMd;
+                rightBody = rightMixed.sideText;
+            }
+            const leftMixed = splitMixedImageText(leftBody);
+            if (leftMixed?.sideText && bodyLooksLikeImageOnly(leftMixed.imageMd)) {
+                leftBody = leftMixed.imageMd;
+                if (!rightBody) rightBody = leftMixed.sideText;
+            }
+            bodies = [leftBody, rightBody];
         } else {
             const extracted = cmView.state.sliceDoc(from, to);
             bodies = Array.from({ length: n }, (_, i) => {
@@ -2459,8 +2596,11 @@ class BlockDndPlugin extends obsidian.Plugin {
             const imageOnly = bodyLooksLikeImageOnly(bodyText);
             // Half-width text slot: always show a resizable text box at the top
             // beside the image (drag the bottom edge to grow downward).
+            // Image slots stay in preview mode so the picture does not "disappear"
+            // into raw ![[...]] source on click.
             const alwaysShowEditor = !!meta.singleCol && i > 0 && !imageOnly;
             if (alwaysShowEditor) wrap.classList.add('always-show-editor');
+            if (imageOnly) wrap.classList.add('image-preview-cell');
 
             const previewEl = document.createElement('div');
             previewEl.className = 'block-dnd-col-preview markdown-rendered';
@@ -2484,6 +2624,7 @@ class BlockDndPlugin extends obsidian.Plugin {
             }
 
             const enterEditMode = () => {
+                if (imageOnly) return;
                 wrap.classList.add('is-editing');
             };
             const leaveEditMode = () => {
@@ -2499,6 +2640,7 @@ class BlockDndPlugin extends obsidian.Plugin {
             });
             previewEl.addEventListener('click', (e) => {
                 e.stopPropagation();
+                if (imageOnly) return;
                 enterEditMode();
                 ta.focus({ preventScroll: true });
                 try {
@@ -2507,6 +2649,13 @@ class BlockDndPlugin extends obsidian.Plugin {
                 } catch {
                     /* noop */
                 }
+            });
+            // Double-click image cell if raw markdown edit is needed.
+            previewEl.addEventListener('dblclick', (e) => {
+                if (!imageOnly) return;
+                e.stopPropagation();
+                wrap.classList.add('is-editing');
+                ta.focus({ preventScroll: true });
             });
 
             ta.addEventListener('pointerdown', (e) => {
