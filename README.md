@@ -32,7 +32,7 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 
 **1 Column** makes a half-width row with the image on the left and a text box on the right, top-aligned beside the image. The text box **always matches the image height** (same vertical span as the resize gutter between them). Right-click the **image** (not only the cursor position) → Column → 1 Column. The plugin records the image’s vault path in the column metadata so the picture stays visible. Double-click the image to edit the raw embed.
 
-**2–5 Columns** each show a text box you can click into. Column panels always use a translucent glass background (the same look that used to appear only on hover). **Enter** inserts a new line in that column. **Tab** leaves the column and puts the cursor in the rest of the note (below the columns). **Shift+Tab** leaves the column and puts the cursor above it.
+**2–5 Columns** each show a text box you can click into. Column panels are fully transparent; the vertical gutter between columns stays available to drag-resize. **Enter** always inserts a new line inside that column (it never leaves the panel). **Tab** leaves the column and puts the cursor in the rest of the note (below the columns). **Shift+Tab** leaves the column and puts the cursor above it.
 
 ### Drag and Drop (Desktop)
 

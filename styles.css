@@ -16,24 +16,21 @@
     box-sizing: border-box;
 }
 
-/* Always show the translucent glass column panel (not only on hover). */
+/* Fully transparent column panels; gutter stays available for drag-resize. */
 .block-dnd-columns-root .block-dnd-col-editor,
 .block-dnd-columns-root .block-dnd-col-editor:hover,
 .block-dnd-columns-root .block-dnd-col-editor:focus {
-    background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
+    background: transparent !important;
 }
 
-@supports not (background: color-mix(in srgb, red 50%, transparent)) {
-    .block-dnd-columns-root .block-dnd-col-editor,
-    .block-dnd-columns-root .block-dnd-col-editor:hover,
-    .block-dnd-columns-root .block-dnd-col-editor:focus {
-        background: rgba(0, 0, 0, 0.28) !important;
-    }
-    .theme-light .block-dnd-columns-root .block-dnd-col-editor,
-    .theme-light .block-dnd-columns-root .block-dnd-col-editor:hover,
-    .theme-light .block-dnd-columns-root .block-dnd-col-editor:focus {
-        background: rgba(255, 255, 255, 0.4) !important;
-    }
+.block-dnd-columns-root .block-dnd-col-gutter {
+    opacity: 0.65;
+}
+
+.block-dnd-columns-root:hover .block-dnd-col-gutter,
+.block-dnd-columns-root:focus-within .block-dnd-col-gutter,
+.block-dnd-columns-root .block-dnd-col-gutter.block-dnd-gutter-active {
+    opacity: 1;
 }
 
 .block-dnd-columns-root {

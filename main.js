@@ -96,6 +96,72 @@ function isColumnTabKey(e) {
     return e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing;
 }
 
+/** Insert a newline at the caret without letting Obsidian/CM handle Enter. */
+function insertNewlineInColumnTextarea(ta) {
+    if (!(ta instanceof HTMLTextAreaElement)) return;
+    const start = typeof ta.selectionStart === 'number' ? ta.selectionStart : ta.value.length;
+    const end = typeof ta.selectionEnd === 'number' ? ta.selectionEnd : start;
+    const value = ta.value ?? '';
+    ta.value = value.slice(0, start) + '\n' + value.slice(end);
+    const caret = start + 1;
+    try {
+        ta.setSelectionRange(caret, caret);
+    } catch {
+        /* noop */
+    }
+    // Notify listeners (row sizing / preview) without relying on the browser Enter default.
+    try {
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch {
+        /* noop */
+    }
+}
+
+function captureColumnEditorFocus(root) {
+    const ae = document.activeElement;
+    if (!(ae instanceof HTMLTextAreaElement) || !ae.classList.contains('block-dnd-col-editor')) {
+        return null;
+    }
+    if (!(root instanceof HTMLElement) || !root.contains(ae)) return null;
+    const list = root.querySelectorAll('.block-dnd-col-editor');
+    const idx = Array.prototype.indexOf.call(list, ae);
+    if (idx < 0) return null;
+    return {
+        idx,
+        start: typeof ae.selectionStart === 'number' ? ae.selectionStart : (ae.value || '').length,
+        end: typeof ae.selectionEnd === 'number' ? ae.selectionEnd : (ae.value || '').length,
+    };
+}
+
+function restoreColumnEditorFocus(uuid, focus) {
+    if (!focus || typeof focus.idx !== 'number') return;
+    const tryRestore = () => {
+        const newRoot = document.querySelector(
+            `.block-dnd-columns-root[data-block-dnd-id="${uuid}"]`
+        );
+        if (!(newRoot instanceof HTMLElement)) return false;
+        const list = newRoot.querySelectorAll('.block-dnd-col-editor');
+        const ta = list[focus.idx];
+        if (!(ta instanceof HTMLTextAreaElement)) return false;
+        try {
+            ta.focus({ preventScroll: true });
+            const len = (ta.value || '').length;
+            const start = Math.max(0, Math.min(len, focus.start ?? len));
+            const end = Math.max(0, Math.min(len, focus.end ?? start));
+            ta.setSelectionRange(start, end);
+        } catch {
+            /* noop */
+        }
+        return document.activeElement === ta;
+    };
+    if (tryRestore()) return;
+    requestAnimationFrame(() => {
+        if (tryRestore()) return;
+        window.setTimeout(tryRestore, 50);
+        window.setTimeout(tryRestore, 160);
+    });
+}
+
 /**
  * Place the caret in a textarea near a click after mousedown preventDefault
  * (which otherwise leaves the caret at the end / previous offset).
@@ -1410,8 +1476,14 @@ class BlockDndPlugin extends obsidian.Plugin {
     /** Debounced persist for column body edits (uuid → timeout id) */
     columnBodyPersistTimers = new Map();
 
+    /** Fence id currently being rewritten (ignore synthetic blur from remount) */
+    _columnPersistRemounting = null;
+
     /** Deferred focus so LP / CM can run first, then we focus the column textarea */
     columnEditorFocusHack = null;
+
+    /** Document-capture Enter guard so column textareas never lose the key to CM */
+    columnEditorKeyGuard = null;
 
     /** Deferred textarea focus timer — cleared on any pointerdown so main-note clicks are not overridden */
     columnFocusDeferTimer = null;
@@ -1574,6 +1646,21 @@ class BlockDndPlugin extends obsidian.Plugin {
         document.addEventListener('pointerdown', this.columnEditorFocusHack, true);
         document.addEventListener('mousedown', this.columnEditorFocusHack, true);
 
+        // Capture Enter at document level so Obsidian/CM cannot steal it from a
+        // focused column textarea (which felt like "newline then kick out").
+        this.columnEditorKeyGuard = (e) => {
+            const t = e.target;
+            if (!(t instanceof HTMLTextAreaElement) || !t.classList.contains('block-dnd-col-editor')) {
+                return;
+            }
+            if (!isColumnPlainEnterKey(e)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+            insertNewlineInColumnTextarea(t);
+        };
+        document.addEventListener('keydown', this.columnEditorKeyGuard, true);
+
         this.boundModifierKeySync = (e) => this.onModifierKeyboardSync(e);
         this.boundWindowBlurForModifiers = () => this.clearModifierHoldState();
         window.addEventListener('keydown', this.boundModifierKeySync, true);
@@ -1599,6 +1686,10 @@ class BlockDndPlugin extends obsidian.Plugin {
             document.removeEventListener('pointerdown', this.columnEditorFocusHack, true);
             document.removeEventListener('mousedown', this.columnEditorFocusHack, true);
             this.columnEditorFocusHack = null;
+        }
+        if (this.columnEditorKeyGuard) {
+            document.removeEventListener('keydown', this.columnEditorKeyGuard, true);
+            this.columnEditorKeyGuard = null;
         }
         this.cleanup();
         this.removeStyles();
@@ -1830,9 +1921,9 @@ class BlockDndPlugin extends obsidian.Plugin {
                 font-size: var(--font-text-size);
                 line-height: var(--line-height-normal);
                 color: var(--text-normal);
-                /* Always use the glass/transparent panel look (not only on hover). */
-                background: color-mix(in srgb, var(--background-secondary) 42%, transparent);
-                border: 1px solid var(--background-modifier-border);
+                /* Fully transparent panels — wallpaper / note shows through. */
+                background: transparent !important;
+                border: 1px solid color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
                 border-radius: var(--radius-s, 4px);
                 resize: vertical;
                 outline: none;
@@ -1840,15 +1931,6 @@ class BlockDndPlugin extends obsidian.Plugin {
                 cursor: text;
                 -webkit-user-select: text;
                 user-select: text;
-            }
-
-            @supports not (background: color-mix(in srgb, red 50%, transparent)) {
-                .block-dnd-columns-root .block-dnd-col-editor {
-                    background: rgba(0, 0, 0, 0.28);
-                }
-                .theme-light .block-dnd-columns-root .block-dnd-col-editor {
-                    background: rgba(255, 255, 255, 0.4);
-                }
             }
 
             /* Explicitly undo the clipped 1px hide so text cannot vanish on click-to-edit */
@@ -1866,8 +1948,8 @@ class BlockDndPlugin extends obsidian.Plugin {
                 opacity: 1 !important;
                 pointer-events: auto !important;
                 resize: vertical !important;
-                border: 1px solid var(--background-modifier-border);
-                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
+                border: 1px solid color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+                background: transparent !important;
             }
 
             .block-dnd-col-cell.is-editing-cell,
@@ -1876,31 +1958,14 @@ class BlockDndPlugin extends obsidian.Plugin {
                 overflow: visible;
             }
 
-            .block-dnd-columns-root .block-dnd-col-editor:hover {
-                /* Keep the same transparency while hovered — do not go opaque. */
-                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
+            .block-dnd-columns-root .block-dnd-col-editor:hover,
+            .block-dnd-columns-root .block-dnd-col-editor:focus {
+                background: transparent !important;
             }
 
             .block-dnd-columns-root .block-dnd-col-editor:focus {
                 box-shadow: inset 0 0 0 1px var(--interactive-accent);
                 border-color: var(--interactive-accent);
-                /* Keep the same transparency while focused — do not go opaque. */
-                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
-            }
-
-            @supports not (background: color-mix(in srgb, red 50%, transparent)) {
-                .block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
-                .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor,
-                .block-dnd-columns-root .block-dnd-col-editor:hover,
-                .block-dnd-columns-root .block-dnd-col-editor:focus {
-                    background: rgba(0, 0, 0, 0.28) !important;
-                }
-                .theme-light .block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
-                .theme-light .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor,
-                .theme-light .block-dnd-columns-root .block-dnd-col-editor:hover,
-                .theme-light .block-dnd-columns-root .block-dnd-col-editor:focus {
-                    background: rgba(255, 255, 255, 0.4) !important;
-                }
             }
 
             .block-dnd-columns-root .block-dnd-col-gutter {
@@ -1912,7 +1977,8 @@ class BlockDndPlugin extends obsidian.Plugin {
                 touch-action: none;
                 flex: 0 0 auto;
                 position: relative;
-                opacity: 0;
+                /* Always findable with transparent panels; brighter on hover/drag. */
+                opacity: 0.65;
                 transition: opacity 0.12s ease;
                 min-height: 3.2em;
             }
@@ -3276,13 +3342,18 @@ class BlockDndPlugin extends obsidian.Plugin {
         this.columnBodyPersistTimers.set(uuid, tid);
     }
 
-    async flushColumnBodiesFromRoot(uuid, root, sourcePath) {
+    async flushColumnBodiesFromRoot(uuid, root, sourcePath, opts = {}) {
         if (!root) return;
         const textareas = root.querySelectorAll('.block-dnd-col-editor');
         const newBodies = Array.from(textareas).map(t => t.value);
         // A remount can fire blur on a torn-down widget with 0 textareas —
         // never persist that, or column text is wiped.
         if (!newBodies.length) return;
+
+        // Rewriting the fence remounts the Live Preview widget. If the user is
+        // still editing a cell, capture caret so we can put them back.
+        const focus =
+            opts.restoreFocus === false ? null : captureColumnEditorFocus(root);
 
         const activeView = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
         const md =
@@ -3321,7 +3392,16 @@ class BlockDndPlugin extends obsidian.Plugin {
             widths: w
         };
 
-        await this._persistColumnFence(sourcePath, meta, newBodies);
+        this._columnPersistRemounting = uuid;
+        try {
+            await this._persistColumnFence(sourcePath, meta, newBodies);
+        } finally {
+            window.setTimeout(() => {
+                if (this._columnPersistRemounting === uuid) this._columnPersistRemounting = null;
+            }, 200);
+        }
+
+        if (focus) restoreColumnEditorFocus(uuid, focus);
     }
 
     async persistColumnFenceWidths(sourcePath, uuid, widthsNorm, bodiesSnapshot, metaBase) {
@@ -3357,7 +3437,8 @@ class BlockDndPlugin extends obsidian.Plugin {
         if (prevTimer) clearTimeout(prevTimer);
         this.columnBodyPersistTimers.delete(uuid);
         try {
-            await this.flushColumnBodiesFromRoot(uuid, root, sourcePath);
+            // Tab exits the columns — do not restore focus into a remounted cell.
+            await this.flushColumnBodiesFromRoot(uuid, root, sourcePath, { restoreFocus: false });
         } catch {
             /* noop */
         }
@@ -3579,26 +3660,42 @@ class BlockDndPlugin extends obsidian.Plugin {
                     return;
                 }
                 if (isColumnPlainEnterKey(e)) {
-                    // Keep Enter inside the textarea (newline). Do not preventDefault.
+                    // Own the newline: never let Enter leave the column panel.
+                    e.preventDefault();
                     e.stopPropagation();
                     if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+                    insertNewlineInColumnTextarea(ta);
                 }
             }, true);
 
-            ta.addEventListener('input', () => {
-                this.scheduleColumnBodyPersist(meta.id, root, ctx.sourcePath);
-            });
+            // Do NOT persist on every keystroke. Rewriting the fence remounts the
+            // Live Preview widget and kicks focus out of the panel (Enter looked
+            // like "newline then exit"). Save on blur / Tab instead.
             ta.addEventListener('blur', () => {
+                if (this._columnPersistRemounting === meta.id) return;
                 const prev = this.columnBodyPersistTimers.get(meta.id);
                 if (prev) clearTimeout(prev);
                 this.columnBodyPersistTimers.delete(meta.id);
-                void this.flushColumnBodiesFromRoot(meta.id, root, ctx.sourcePath);
                 window.setTimeout(() => {
-                    if (document.activeElement !== ta) leaveEditMode();
+                    if (this._columnPersistRemounting === meta.id) return;
+                    const next = document.activeElement;
+                    const stayingInColumns =
+                        next instanceof HTMLTextAreaElement &&
+                        next.classList.contains('block-dnd-col-editor') &&
+                        (root.contains(next) ||
+                            !!next.closest(`.block-dnd-columns-root[data-block-dnd-id="${meta.id}"]`));
+                    void this.flushColumnBodiesFromRoot(meta.id, root, ctx.sourcePath, {
+                        restoreFocus: stayingInColumns,
+                    });
+                    if (!stayingInColumns && document.activeElement !== ta) leaveEditMode();
                 }, 0);
             });
 
             ta.addEventListener('input', () => {
+                if (meta.singleCol && alwaysShowEditor) {
+                    ta.rows = 1;
+                    return;
+                }
                 ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
             });
 
@@ -3982,4 +4079,5 @@ BlockDndPlugin._columnEditTest = {
     isColumnPlainEnterKey,
     isColumnTabKey,
     bdndSyncSingleColTextHeight,
+    insertNewlineInColumnTextarea,
 };
