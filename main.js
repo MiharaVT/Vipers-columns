@@ -80,20 +80,32 @@ function serializeColumnFence(meta, bodies) {
     return JSON.stringify(meta) + '\n' + bodies.join(COLUMN_BODY_SEP);
 }
 
-/** Wiki embeds `![[path|wxh]]` compatible with the Zotion plugin (read-only mimic; keeps column bodies consistent). */
-const BDND_WIKI_EMBED_RE_SOURCE = '!\\[\\[([^\\]#|]+?)(?:\\|(\\d+)(?:x(\\d+))?)?\\]\\]';
+/**
+ * Wiki embeds `![[path]]` / `![[path|316]]` / `![[path|316x200]]` / `![[path|alias]]`.
+ * Pipe suffix may be dimensions or an alias — dimensions are parsed when numeric.
+ */
+const BDND_WIKI_EMBED_RE_SOURCE = '!\\[\\[([^\\]#|]+?)(?:\\|([^\\]]*))?\\]\\]';
 
 const BDND_IMAGE_ACCEPT_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']);
 
 function bdndWikiMatchFromExec(m) {
-    const widthTok = m[2];
-    const heightTok = m[3];
+    const pipe = m[2];
+    let width = null;
+    let height = null;
+    if (pipe) {
+        const dim = String(pipe).match(/^(\d+)(?:x(\d+))?$/);
+        if (dim) {
+            width = parseInt(dim[1], 10);
+            height = dim[2] !== undefined ? parseInt(dim[2], 10) : null;
+        }
+    }
     return {
         fullFrom: m.index,
         fullTo: m.index + m[0].length,
         linkPathRaw: m[1] ?? '',
-        width: widthTok !== undefined ? parseInt(widthTok, 10) : null,
-        height: heightTok !== undefined ? parseInt(heightTok, 10) : null,
+        width,
+        height,
+        pipe: pipe ?? null,
         raw: m[0],
     };
 }
@@ -882,6 +894,225 @@ function bdndPreserveEmbedsInBodies(oldSlice, bodies) {
     return next;
 }
 
+function bdndPathsLooselyMatch(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const na = a.replace(/\\/g, '/');
+    const nb = b.replace(/\\/g, '/');
+    if (na === nb) return true;
+    if (na.endsWith('/' + nb) || nb.endsWith('/' + na)) return true;
+    const ba = na.split('/').pop();
+    const bb = nb.split('/').pop();
+    return !!ba && ba === bb;
+}
+
+/** Find a document line whose wiki embed matches an Obsidian embed `src` path. */
+function findDocLineForImagePath(doc, srcPath) {
+    if (!srcPath) return null;
+    for (let i = 1; i <= doc.lines; i++) {
+        const line = doc.line(i);
+        const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g');
+        let m;
+        while ((m = re.exec(line.text)) !== null) {
+            const hit = bdndWikiMatchFromExec(m);
+            if (!bdndPathsLooselyMatch(hit.linkPathRaw, srcPath)) continue;
+            const sideText = (line.text.slice(0, hit.fullFrom) + line.text.slice(hit.fullTo)).trim();
+            return {
+                line0: i - 1,
+                line,
+                imageMd: hit.raw,
+                imagePath: hit.linkPathRaw,
+                width: hit.width,
+                sideText,
+            };
+        }
+    }
+    return null;
+}
+
+/**
+ * Resolve the image the user actually right-clicked in Live Preview.
+ * Prefer `.internal-embed[src]` under the click — not the editor cursor.
+ */
+function resolveClickedImageTarget(app, cmView, pointerContext) {
+    if (!pointerContext || !cmView) return null;
+    if (Date.now() - (pointerContext.time || 0) > 8000) return null;
+
+    const doc = cmView.state.doc;
+    let el = pointerContext.target;
+    if (!(el instanceof Element)) {
+        el = document.elementFromPoint(pointerContext.x, pointerContext.y);
+    }
+    if (!(el instanceof Element)) return null;
+
+    const embed =
+        el.closest('.internal-embed, .image-embed, .media-embed, span.cm-hmd-internal-link') ||
+        null;
+    const imgEl = el.closest('img') || embed?.querySelector?.('img');
+
+    let srcPath = '';
+    if (embed) {
+        srcPath =
+            embed.getAttribute('src') ||
+            embed.getAttribute('alt') ||
+            embed.getAttribute('data-path') ||
+            '';
+    }
+    // Some LP embeds only expose a resource URL on <img>; map it back to a vault file.
+    if (!srcPath && imgEl instanceof HTMLImageElement && app?.vault) {
+        const current = imgEl.currentSrc || imgEl.src || '';
+        if (current) {
+            try {
+                const files = app.vault.getFiles();
+                for (const f of files) {
+                    if (!bdndIsPreviewImageExt(f.extension)) continue;
+                    if (bdndImageSrcLikelyFromFile(current, f, app)) {
+                        srcPath = f.path;
+                        break;
+                    }
+                }
+            } catch {
+                /* noop */
+            }
+        }
+    }
+
+    // Walk up to a cm-line / embed block and map to a document position.
+    let lineFromDom = null;
+    const domProbe = embed || imgEl || el;
+    try {
+        const pos = cmView.posAtDOM(domProbe);
+        if (typeof pos === 'number') {
+            lineFromDom = doc.lineAt(pos);
+        }
+    } catch {
+        try {
+            const lineEl = domProbe.closest?.('.cm-line');
+            if (lineEl) {
+                const pos = cmView.posAtDOM(lineEl);
+                if (typeof pos === 'number') lineFromDom = doc.lineAt(pos);
+            }
+        } catch {
+            /* noop */
+        }
+    }
+
+    if (srcPath) {
+        const found = findDocLineForImagePath(doc, srcPath);
+        if (found) return found;
+        // Reconstruct markdown even if the source line lookup failed.
+        let width = null;
+        if (imgEl instanceof HTMLImageElement) {
+            const w = Math.round(imgEl.getBoundingClientRect().width);
+            if (w > 0) width = w;
+        }
+        const imageMd = width ? `![[${srcPath}|${width}]]` : `![[${srcPath}]]`;
+        if (lineFromDom) {
+            return {
+                line0: lineFromDom.number - 1,
+                line: lineFromDom,
+                imageMd,
+                imagePath: srcPath,
+                width,
+                sideText: '',
+            };
+        }
+        return {
+            line0: null,
+            line: null,
+            imageMd,
+            imagePath: srcPath,
+            width,
+            sideText: '',
+            // No line — caller must locate/replace carefully
+            synthetic: true,
+        };
+    }
+
+    if (lineFromDom) {
+        const t = lineFromDom.text;
+        if (isWikiImageLine(t)) {
+            const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+            const m = re.exec(t);
+            const hit = m ? bdndWikiMatchFromExec(m) : null;
+            return {
+                line0: lineFromDom.number - 1,
+                line: lineFromDom,
+                imageMd: t.trim(),
+                imagePath: hit?.linkPathRaw || t.trim(),
+                width: hit?.width ?? null,
+                sideText: '',
+            };
+        }
+        const mixed = splitMixedImageText(t);
+        if (mixed) {
+            const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+            const m = re.exec(t);
+            const hit = m ? bdndWikiMatchFromExec(m) : null;
+            return {
+                line0: lineFromDom.number - 1,
+                line: lineFromDom,
+                imageMd: mixed.imageMd,
+                imagePath: hit?.linkPathRaw || mixed.imageMd,
+                width: hit?.width ?? null,
+                sideText: mixed.sideText,
+            };
+        }
+    }
+
+    return null;
+}
+
+/** Append a resolved <img> (or placeholder) into el from a vault link path. */
+function bdndAppendResolvedImage(app, el, imagePath, sourcePath, width, height) {
+    const path = (imagePath || '').trim();
+    if (!path) return false;
+
+    const finishImg = (img) => {
+        if (width && width > 0) img.style.width = `${width}px`;
+        if (height && height > 0) img.style.height = `${height}px`;
+        else img.style.height = 'auto';
+        img.style.maxWidth = '100%';
+        img.style.minHeight = '48px';
+        img.style.display = 'block';
+        img.style.position = 'relative';
+        el.appendChild(img);
+        return true;
+    };
+
+    // Already a usable URL (resource / http / data).
+    if (/^(https?:|app:|data:|blob:|capacitor:)/i.test(path)) {
+        const img = document.createElement('img');
+        img.className = 'block-dnd-col-direct-img';
+        img.draggable = false;
+        img.src = path;
+        return finishImg(img);
+    }
+
+    const dest = bdndResolveImageFile(app, path, sourcePath);
+    if (!(dest instanceof obsidian.TFile)) {
+        const ph = document.createElement('div');
+        ph.className = 'block-dnd-col-image-placeholder';
+        ph.textContent = `![[${path}]]`;
+        el.appendChild(ph);
+        return false;
+    }
+    const img = document.createElement('img');
+    img.className = 'block-dnd-col-direct-img';
+    img.alt = dest.basename;
+    img.draggable = false;
+    try {
+        img.src = app.vault.getResourcePath(dest);
+    } catch {
+        const ph = document.createElement('div');
+        ph.className = 'block-dnd-col-image-placeholder';
+        ph.textContent = `![[${path}]]`;
+        el.appendChild(ph);
+        return false;
+    }
+    return finishImg(img);
+}
+
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
 function wrapColumnFenceInner(inner, oldSliceEndsWithNewline) {
     let fence = '```' + BLOCK_DND_COLUMNS_LANG + '\n' + inner + '\n```';
@@ -1026,6 +1257,12 @@ class BlockDndPlugin extends obsidian.Plugin {
     /** Keep caret indicator aligned while cm-scroller scrolls during drag */
     dragScrollRefreshBound = null;
 
+    /**
+     * Last editor right-click (cursor is often NOT on the image when the menu opens).
+     * { x, y, time, target }
+     */
+    lastPointerContext = null;
+
     async onload() {
         await this.loadSettings();
         
@@ -1039,6 +1276,24 @@ class BlockDndPlugin extends obsidian.Plugin {
         this.registerMarkdownCodeBlockProcessor(BLOCK_DND_COLUMNS_LANG, async (source, el, ctx) => {
             await this.renderColumnCodeBlock(source, el, ctx);
         });
+
+        // Capture the actual right-click target — editor selection often stays elsewhere
+        // when the user right-clicks a Live Preview image embed.
+        this.registerDomEvent(
+            document,
+            'contextmenu',
+            (e) => {
+                const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+                if (!view?.contentEl?.contains(e.target)) return;
+                this.lastPointerContext = {
+                    x: e.clientX,
+                    y: e.clientY,
+                    time: Date.now(),
+                    target: e.target instanceof Element ? e.target : null,
+                };
+            },
+            true
+        );
 
         this.registerEvent(
             this.app.workspace.on('editor-menu', (menu, editor, view) => {
@@ -2383,16 +2638,27 @@ class BlockDndPlugin extends obsidian.Plugin {
         this.cmContent = cmContent;
         this.cmScroller = markdownView.contentEl.querySelector('.cm-scroller');
 
+        // "1 Column" = image | text side-by-side. Use the right-click target so we
+        // wrap the image the user clicked, not wherever the cursor happens to be.
+        if (columnCount === 1) {
+            this.replaceWithOneColumnBesideImage(editor);
+            return;
+        }
+
         const cm = editor.cm;
         const headPos = cm.state.selection.main.head;
 
         this.blocks = this.parseBlocksFromDOM();
         let blockIdx = null;
 
-        // Primary: use screen coords of cursor to find the closest .cm-line DOM element,
-        // then match it against parsed blocks. This works even when document line numbers
-        // diverge from DOM element indices (e.g. after a column fence widget).
-        const coords = cm.coordsAtPos(headPos);
+        // Prefer click coords when available; else cursor coords.
+        const ptr = this.lastPointerContext;
+        const clickX = ptr && Date.now() - ptr.time < 8000 ? ptr.x : null;
+        const clickY = ptr && Date.now() - ptr.time < 8000 ? ptr.y : null;
+        const coords =
+            clickX != null && clickY != null
+                ? { left: clickX, top: clickY }
+                : cm.coordsAtPos(headPos);
         if (coords) {
             const lineEls = Array.from(cmContent.querySelectorAll('.cm-line'));
             let closestEl = null;
@@ -2400,7 +2666,11 @@ class BlockDndPlugin extends obsidian.Plugin {
             for (const el of lineEls) {
                 const rect = el.getBoundingClientRect();
                 const midY = (rect.top + rect.bottom) / 2;
-                const dist = Math.abs(coords.top - midY);
+                const midX = (rect.left + rect.right) / 2;
+                const dist =
+                    clickX != null
+                        ? Math.hypot(coords.left - midX, coords.top - midY)
+                        : Math.abs(coords.top - midY);
                 if (dist < closestDist) {
                     closestDist = dist;
                     closestEl = el;
@@ -2416,7 +2686,6 @@ class BlockDndPlugin extends obsidian.Plugin {
             }
         }
 
-        // Fallback: match document line number against DOM indices (works when no fences above)
         if (blockIdx === null) {
             const line0 = cm.state.doc.lineAt(headPos).number - 1;
             for (let i = 0; i < this.blocks.length; i++) {
@@ -2434,11 +2703,191 @@ class BlockDndPlugin extends obsidian.Plugin {
         this.replaceBlockWithColumns(blockIdx, columnCount, cursorLine0);
     }
 
+    /**
+     * Half-width layout: keep the clicked image on the left (path stored in meta)
+     * and a resizable text box on the right. Never drops the image from the note.
+     */
+    replaceWithOneColumnBesideImage(editor) {
+        const cmView = editor?.cm;
+        if (!cmView) return;
+        const doc = cmView.state.doc;
+        const headPos = cmView.state.selection.main.head;
+        const cursorLine0 = doc.lineAt(headPos).number - 1;
+
+        let clicked = resolveClickedImageTarget(this.app, cmView, this.lastPointerContext);
+
+        // Fall back to document scan near the cursor / selection.
+        let pair = null;
+        if (clicked?.imageMd && clicked.line) {
+            let right = clicked.sideText || '';
+            let from = clicked.line.from;
+            let to = clicked.line.to;
+            if (!right) {
+                const after = findAdjacentMatchingLine(doc, clicked.line0, 'after', isSimpleSideParagraphLine);
+                if (after) {
+                    right = after.text.trim();
+                    to = after.line.to;
+                } else {
+                    const before = findAdjacentMatchingLine(
+                        doc,
+                        clicked.line0,
+                        'before',
+                        isSimpleSideParagraphLine
+                    );
+                    if (before) {
+                        right = before.text.trim();
+                        from = before.line.from;
+                    }
+                }
+            }
+            pair = {
+                left: clicked.imageMd,
+                right,
+                from,
+                to,
+                imagePath: clicked.imagePath,
+                imageWidth: clicked.width,
+            };
+        } else if (clicked?.imageMd && clicked.imagePath) {
+            // Synthetic path from embed src with no reliable line — search whole doc.
+            const found = findDocLineForImagePath(doc, clicked.imagePath);
+            if (found) {
+                let right = found.sideText || '';
+                let from = found.line.from;
+                let to = found.line.to;
+                if (!right) {
+                    const after = findAdjacentMatchingLine(
+                        doc,
+                        found.line0,
+                        'after',
+                        isSimpleSideParagraphLine
+                    );
+                    if (after) {
+                        right = after.text.trim();
+                        to = after.line.to;
+                    }
+                }
+                pair = {
+                    left: found.imageMd,
+                    right,
+                    from,
+                    to,
+                    imagePath: found.imagePath,
+                    imageWidth: found.width ?? clicked.width,
+                };
+            } else {
+                // Insert a new column fence at the cursor that still references the image.
+                const line = doc.lineAt(headPos);
+                pair = {
+                    left: clicked.imageMd,
+                    right: '',
+                    from: line.from,
+                    to: line.to,
+                    imagePath: clicked.imagePath,
+                    imageWidth: clicked.width,
+                    insertOnly: true,
+                };
+            }
+        } else {
+            pair = resolveOneColumnPair(doc, cursorLine0, cursorLine0, cursorLine0);
+            const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+            const m = re.exec(pair.left || '');
+            if (m) {
+                const hit = bdndWikiMatchFromExec(m);
+                pair.imagePath = hit.linkPathRaw;
+                pair.imageWidth = hit.width;
+            }
+        }
+
+        if (!pair) return;
+
+        let from = pair.from;
+        let to = pair.to;
+        let leftBody = pair.left || '';
+        let rightBody = pair.right || '';
+
+        // If left still isn't an image but we know imagePath, force wiki markdown in.
+        if (pair.imagePath && !bodyLooksLikeImageOnly(leftBody)) {
+            leftBody =
+                pair.imageWidth && pair.imageWidth > 0
+                    ? `![[${pair.imagePath}|${pair.imageWidth}]]`
+                    : `![[${pair.imagePath}]]`;
+        }
+
+        const id = randomBlockId();
+        const n = 2;
+        const widths = equalWidthPercents(n);
+        let bodies = [leftBody, rightBody];
+
+        const oldSlice = pair.insertOnly ? '' : cmView.state.sliceDoc(from, to);
+        if (!pair.insertOnly) {
+            bodies = bdndPreserveEmbedsInBodies(oldSlice, bodies);
+        }
+
+        // Last resort: if the replace range still contains embeds missing from bodies
+        // (shouldn't happen), abort rather than delete the picture.
+        if (!pair.insertOnly) {
+            const oldEmbeds = oldSlice.match(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g')) || [];
+            const joined = bodies.join('\n');
+            for (const emb of oldEmbeds) {
+                if (!joined.includes(emb)) {
+                    console.error(
+                        "[Viper's Columns] Refusing to apply 1 Column — would delete image:",
+                        emb
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Persist vault path in meta so the renderer does not depend on MarkdownRenderer.
+        let imagePath = pair.imagePath || null;
+        let imageWidth = pair.imageWidth || null;
+        if (!imagePath) {
+            const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
+            const m = re.exec(bodies[0] || '');
+            if (m) {
+                const hit = bdndWikiMatchFromExec(m);
+                imagePath = hit.linkPathRaw;
+                imageWidth = hit.width;
+            }
+        }
+
+        const meta = {
+            id,
+            n,
+            widths,
+            singleCol: true,
+            ...(imagePath ? { imagePath, imageWidth } : {}),
+        };
+        const inner = serializeColumnFence(meta, bodies);
+        const fence = wrapColumnFenceInner(inner, pair.insertOnly ? false : oldSlice.endsWith('\n'));
+
+        const charAfterTo = cmView.state.doc.sliceString(to, Math.min(to + 1, cmView.state.doc.length));
+        const needsTrailingNewline = !fence.endsWith('\n') && charAfterTo !== '\n';
+        const insertText = needsTrailingNewline ? fence + '\n' : fence;
+        const cursorBelowFence = from + (fence.endsWith('\n') ? fence.length : fence.length + 1);
+
+        cmView.dispatch({
+            changes: { from, to, insert: insertText },
+            selection: { anchor: cursorBelowFence, head: cursorBelowFence },
+            userEvent: 'block-dnd.columns'
+        });
+
+        setTimeout(() => this.forceRender(), 60);
+    }
+
     replaceBlockWithColumns(blockIndex, columnCount, cursorLine0) {
         const editor = this.activeView?.editor;
         const cmView = editor?.cm;
         const block = this.blocks[blockIndex];
         if (!editor || !cmView || !block || columnCount < 1 || columnCount > 5) {
+            return;
+        }
+
+        // 1 Column has a dedicated path (click-target + imagePath meta).
+        if (columnCount === 1) {
+            this.replaceWithOneColumnBesideImage(editor);
             return;
         }
 
@@ -2451,7 +2900,6 @@ class BlockDndPlugin extends obsidian.Plugin {
             blockStartLine = cmView.state.doc.lineAt(cmView.posAtDOM(firstEl)).number - 1;
             blockEndLine = cmView.state.doc.lineAt(cmView.posAtDOM(lastEl)).number - 1;
         } catch {
-            // Embed widgets sometimes throw from posAtDOM — fall back to cursor line.
             const fallback =
                 typeof cursorLine0 === 'number'
                     ? cursorLine0
@@ -2461,46 +2909,22 @@ class BlockDndPlugin extends obsidian.Plugin {
         }
 
         const doc = cmView.state.doc;
-        let from = doc.line(blockStartLine + 1).from;
-        let to = doc.line(blockEndLine + 1).to;
+        const from = doc.line(blockStartLine + 1).from;
+        const to = doc.line(blockEndLine + 1).to;
 
         const id = randomBlockId();
-        const n = columnCount === 1 ? 2 : columnCount;
+        const n = columnCount;
         const widths = equalWidthPercents(n);
-        let bodies;
-
-        if (columnCount === 1) {
-            // Half-width row: image on the left, text on the right. Image-first
-            // scan so Live Preview embed widgets cannot drop the picture.
-            const pair = resolveOneColumnPair(doc, blockStartLine, blockEndLine, cursorLine0);
-            from = pair.from;
-            to = pair.to;
-            let leftBody = pair.left;
-            let rightBody = pair.right;
-            const rightMixed = splitMixedImageText(rightBody);
-            if (rightMixed?.imageMd) {
-                if (!bodyLooksLikeImageOnly(leftBody)) leftBody = rightMixed.imageMd;
-                rightBody = rightMixed.sideText;
-            }
-            const leftMixed = splitMixedImageText(leftBody);
-            if (leftMixed?.sideText && bodyLooksLikeImageOnly(leftMixed.imageMd)) {
-                leftBody = leftMixed.imageMd;
-                if (!rightBody) rightBody = leftMixed.sideText;
-            }
-            bodies = [leftBody, rightBody];
-        } else {
-            const extracted = cmView.state.sliceDoc(from, to);
-            bodies = Array.from({ length: n }, (_, i) => {
-                if (i === 0) return extracted;
-                return `_Column ${i + 1}_`;
-            });
-        }
+        const extracted = cmView.state.sliceDoc(from, to);
+        let bodies = Array.from({ length: n }, (_, i) => {
+            if (i === 0) return extracted;
+            return `_Column ${i + 1}_`;
+        });
 
         const oldSlice = cmView.state.sliceDoc(from, to);
-        // Never delete a wiki image from the note without putting it in a column body.
         bodies = bdndPreserveEmbedsInBodies(oldSlice, bodies);
 
-        const meta = columnCount === 1 ? { id, n, widths, singleCol: true } : { id, n, widths };
+        const meta = { id, n, widths };
         const inner = serializeColumnFence(meta, bodies);
         let fence = wrapColumnFenceInner(inner, oldSlice.endsWith('\n'));
 
@@ -2696,7 +3120,10 @@ class BlockDndPlugin extends obsidian.Plugin {
             cell.appendChild(wrap);
 
             const bodyText = bodies[i] ?? '';
-            const imageOnly = bodyLooksLikeImageOnly(bodyText);
+            // meta.imagePath is the durable reference written when creating 1 Column
+            // from a right-clicked Live Preview embed (body markdown alone is not enough).
+            const metaImagePath = i === 0 && meta.imagePath ? String(meta.imagePath) : '';
+            const imageOnly = !!metaImagePath || bodyLooksLikeImageOnly(bodyText);
             // Half-width text slot: always show a resizable text box at the top
             // beside the image (drag the bottom edge to grow downward).
             // Image slots stay in preview mode so the picture does not "disappear"
@@ -2708,9 +3135,21 @@ class BlockDndPlugin extends obsidian.Plugin {
             const previewEl = document.createElement('div');
             previewEl.className = 'block-dnd-col-preview markdown-rendered';
 
+            // Paint meta image immediately (does not wait on MarkdownRenderer / input hooks).
+            if (metaImagePath) {
+                bdndAppendResolvedImage(
+                    this.app,
+                    previewEl,
+                    metaImagePath,
+                    ctx.sourcePath,
+                    meta.imageWidth || null,
+                    null
+                );
+            }
+
             const ta = document.createElement('textarea');
             ta.className = 'block-dnd-col-editor';
-            ta.value = bodyText;
+            ta.value = bodyText || (metaImagePath ? `![[${metaImagePath}${meta.imageWidth ? '|' + meta.imageWidth : ''}]]` : '');
             ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
             if (alwaysShowEditor) {
                 ta.style.minHeight = '4.5em';
