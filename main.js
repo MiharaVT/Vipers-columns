@@ -2428,14 +2428,19 @@ class BlockDndPlugin extends obsidian.Plugin {
             cells.forEach((cell, idx) => {
                 if (!(cell instanceof HTMLElement)) return;
                 const pct = perc[idx] ?? 0;
-                cell.style.flex = `${pct} 1 0`;
-                cell.style.width = `${pct}%`;
-                cell.style.maxWidth = `${pct}%`;
+                cell.style.flexGrow = String(pct);
+                cell.style.flexShrink = '1';
+                cell.style.flexBasis = '0';
+                cell.style.minWidth = '0';
+                cell.style.maxWidth = 'none';
             });
             gutters.forEach((gutter) => {
                 if (!(gutter instanceof HTMLElement)) return;
-                gutter.style.flex = `0 0 ${gutterTrackPx}px`;
+                gutter.style.flexGrow = '0';
+                gutter.style.flexShrink = '0';
+                gutter.style.flexBasis = `${gutterTrackPx}px`;
                 gutter.style.width = `${gutterTrackPx}px`;
+                gutter.style.alignSelf = 'stretch';
             });
         };
 
