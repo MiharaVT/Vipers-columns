@@ -23,6 +23,17 @@
     background: transparent !important;
 }
 
+/* Hide Obsidian </> edit button on column blocks only (setting: showColumnEditButton) */
+body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-dnd-columns-embed) .edit-block-button,
+body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-dnd-columns-root) .edit-block-button,
+body.vipers-columns-hide-edit-button .cm-preview-code-block:has(.block-dnd-columns-embed) .edit-block-button,
+body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-language-block-dnd-columns) .edit-block-button {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+
 .block-dnd-columns-root .block-dnd-col-gutter {
     opacity: 0.65;
 }

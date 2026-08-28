@@ -52,6 +52,7 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 - **Hold to show block handles** - Modifier key required to reveal drag handles (Alt / Ctrl / Win / Shift)
 - **Always show handles on mobile** - Show handles without a modifier key on touch devices
 - **Show handle on hover** - Toggle whether drag handles appear on hover (default: enabled)
+- **Show column source edit button** - Show or hide Obsidian’s `</>` button on column blocks only (default: shown). Other code blocks are unaffected.
 
 ## Compatibility
 

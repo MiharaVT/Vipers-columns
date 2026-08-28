@@ -1,5 +1,6 @@
 {
   "showHandleOnHover": true,
   "handleRevealModifier": "alt",
-  "alwaysShowHandlesMobile": false
+  "alwaysShowHandlesMobile": false,
+  "showColumnEditButton": true
 }

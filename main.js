@@ -32,8 +32,15 @@ const DEFAULT_SETTINGS = {
     /** One of: alt | control | meta | shift */
     handleRevealModifier: 'alt',
     /** When true, mobile ignores hotkey and always shows handles when the row is visible */
-    alwaysShowHandlesMobile: true
+    alwaysShowHandlesMobile: true,
+    /**
+     * When true, Obsidian's built-in `</>` edit-block button is shown on column
+     * fences. When false, it is hidden for Viper's Columns blocks only.
+     */
+    showColumnEditButton: true
 };
+
+const VIPERS_COLUMNS_HIDE_EDIT_BUTTON_CLASS = 'vipers-columns-hide-edit-button';
 
 function randomBlockId() {
     return 'bdnd-' + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
@@ -1512,6 +1519,7 @@ class BlockDndPlugin extends obsidian.Plugin {
 
         this.addSettingTab(new BlockDndSettingTab(this.app, this));
         this.addStyles();
+        this.applyColumnEditButtonVisibility();
 
         this.registerMarkdownCodeBlockProcessor(BLOCK_DND_COLUMNS_LANG, async (source, el, ctx) => {
             await this.renderColumnCodeBlock(source, el, ctx);
@@ -1691,6 +1699,7 @@ class BlockDndPlugin extends obsidian.Plugin {
             document.removeEventListener('keydown', this.columnEditorKeyGuard, true);
             this.columnEditorKeyGuard = null;
         }
+        document.body.classList.remove(VIPERS_COLUMNS_HIDE_EDIT_BUTTON_CLASS);
         this.cleanup();
         this.removeStyles();
     }
@@ -1702,10 +1711,23 @@ class BlockDndPlugin extends obsidian.Plugin {
         if (!HANDLE_REVEAL_MODIFIER_CODES[mod]) {
             this.settings.handleRevealModifier = DEFAULT_SETTINGS.handleRevealModifier;
         }
+        if (typeof this.settings.showColumnEditButton !== 'boolean') {
+            this.settings.showColumnEditButton = DEFAULT_SETTINGS.showColumnEditButton;
+        }
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
+        this.applyColumnEditButtonVisibility();
+    }
+
+    /**
+     * Toggle Obsidian's `</>` edit-block button for column fences only
+     * (does not affect other code blocks / embeds).
+     */
+    applyColumnEditButtonVisibility() {
+        const hide = this.settings?.showColumnEditButton === false;
+        document.body.classList.toggle(VIPERS_COLUMNS_HIDE_EDIT_BUTTON_CLASS, hide);
     }
 
     addStyles() {
@@ -1763,6 +1785,18 @@ class BlockDndPlugin extends obsidian.Plugin {
                 z-index: 6;
                 width: 100%;
                 max-width: 100%;
+            }
+
+            /* Hide Obsidian's </> edit-block button on column fences only */
+            body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-dnd-columns-embed) > .edit-block-button,
+            body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-dnd-columns-root) > .edit-block-button,
+            body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-dnd-columns-embed) .edit-block-button,
+            body.vipers-columns-hide-edit-button .cm-preview-code-block:has(.block-dnd-columns-embed) .edit-block-button,
+            body.vipers-columns-hide-edit-button .cm-embed-block:has(.block-language-block-dnd-columns) .edit-block-button {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
             }
 
             .block-dnd-columns-root {
@@ -4068,6 +4102,18 @@ class BlockDndSettingTab extends obsidian.PluginSettingTab {
                     this.plugin.settings.showHandleOnHover = value;
                     await this.plugin.saveSettings();
                     this.plugin.forceRender();
+                })
+            );
+
+        new obsidian.Setting(containerEl)
+            .setName('Show column source edit button')
+            .setDesc(
+                'Obsidian’s built-in </> button on column blocks (opens the raw fence source). Turn off to hide it for Viper\'s Columns only — other code blocks and embeds are unchanged.'
+            )
+            .addToggle((toggle) =>
+                toggle.setValue(this.plugin.settings.showColumnEditButton !== false).onChange(async (value) => {
+                    this.plugin.settings.showColumnEditButton = value;
+                    await this.plugin.saveSettings();
                 })
             );
     }
