@@ -1,0 +1,53 @@
+/* Block Drag & Drop - Additional Styles */
+
+/* Smooth transitions for all interactions */
+.cm-line {
+    transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+/* Handle hover effect enhancement */
+.block-dnd-handle-container {
+    pointer-events: auto;
+}
+
+/* Column editors rendered by Live Preview (markdown fences) */
+.block-dnd-col-editor {
+    box-sizing: border-box;
+}
+
+.block-dnd-columns-root:focus-within {
+    outline: none;
+}
+
+/* Better visual feedback during drag */
+.block-dnd-dragging {
+    transform: scale(0.98);
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Drop caret — visuals aligned with injected styles in main.js (Viper's Columns pulse) */
+.block-dnd-drop-indicator {
+    animation: block-dnd-drop-indicator-pulse 0.85s ease-in-out infinite;
+}
+
+@keyframes block-dnd-drop-indicator-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* Handle icon on dark themes */
+.theme-dark .block-dnd-handle svg {
+    color: var(--text-faint);
+}
+
+.theme-dark .block-dnd-handle:hover svg {
+    color: var(--text-normal);
+}
+
+/* Print mode - hide handles */
+@media print {
+    .block-dnd-handle-wrapper {
+        display: none !important;
+    }
+}
