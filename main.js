@@ -576,42 +576,111 @@ function bdndAttachColumnZotionCompat(ctx) {
     void rebuildPreview();
 }
 
+function isWikiImageLine(text) {
+    const t = (text || '').trim();
+    if (!t) return false;
+    return /^!\[\[.+\]\]$/.test(t) || /^!\[.*\]\([^)]+\)$/.test(t);
+}
+
+function isSimpleSideParagraphLine(text) {
+    const t = (text || '').trim();
+    if (!t) return false;
+    if (isWikiImageLine(t)) return false;
+    if (
+        t.startsWith('```') ||
+        t.startsWith('#') ||
+        t.startsWith('>') ||
+        t.startsWith('|') ||
+        t.startsWith('- ') ||
+        t.startsWith('* ') ||
+        t.startsWith('+ ') ||
+        /^\d+\.\s/.test(t) ||
+        t.startsWith('![')
+    ) {
+        return false;
+    }
+    return true;
+}
+
 /**
- * After a "1 Column" wrap, find a simple following paragraph to place in the
- * right half so text sits at the top next to an image/embed.
- * Skips at most one blank line. Returns null if the next content is not plain text.
+ * Walk forward or backward from a line, skipping at most one blank line,
+ * and return the first matching line via `matchFn`.
  */
-function findFollowingSideParagraph(doc, blockEndLine0) {
-    let line0 = blockEndLine0 + 1;
+function findAdjacentMatchingLine(doc, fromLine0, direction, matchFn) {
+    const step = direction === 'before' ? -1 : 1;
+    let line0 = fromLine0 + step;
     let skippedBlank = false;
-    while (line0 < doc.lines) {
+    while (line0 >= 0 && line0 < doc.lines) {
         const line = doc.line(line0 + 1);
         const raw = line.text;
         const t = raw.trim();
         if (!t) {
             if (skippedBlank) return null;
             skippedBlank = true;
-            line0++;
+            line0 += step;
             continue;
         }
-        if (
-            t.startsWith('```') ||
-            t.startsWith('#') ||
-            t.startsWith('>') ||
-            t.startsWith('|') ||
-            t.startsWith('- ') ||
-            t.startsWith('* ') ||
-            t.startsWith('+ ') ||
-            /^\d+\.\s/.test(t) ||
-            t.startsWith('![') ||
-            t.startsWith('![[') ||
-            /^!\[\[/.test(t)
-        ) {
-            return null;
-        }
+        if (!matchFn(raw)) return null;
         return { text: raw, line0, line };
     }
     return null;
+}
+
+/**
+ * Build a half-width (image | text) pair for "1 Column".
+ * Handles cursor on the image (text below) or on the text (image above).
+ */
+function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
+    const startLine = doc.line(blockStartLine0 + 1);
+    const endLine = doc.line(blockEndLine0 + 1);
+    const selected = doc.sliceString(startLine.from, endLine.to);
+    const selectedTrim = selected.trim();
+
+    // Cursor/block is an image (or embed line): pull following text into the right slot.
+    if (isWikiImageLine(selectedTrim)) {
+        const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
+        return {
+            left: selectedTrim,
+            right: side ? side.text.trim() : '',
+            from: startLine.from,
+            to: side ? side.line.to : endLine.to,
+        };
+    }
+
+    // Cursor/block is plain text: pull a preceding image into the left slot.
+    if (isSimpleSideParagraphLine(selectedTrim)) {
+        const img = findAdjacentMatchingLine(doc, blockStartLine0, 'before', isWikiImageLine);
+        if (img) {
+            return {
+                left: img.text.trim(),
+                right: selectedTrim,
+                from: img.line.from,
+                to: endLine.to,
+            };
+        }
+        // No image above — keep text on the left with an empty right slot.
+        const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
+        return {
+            left: selectedTrim,
+            right: side ? side.text.trim() : '',
+            from: startLine.from,
+            to: side ? side.line.to : endLine.to,
+        };
+    }
+
+    // Fallback: selected block on the left; following simple paragraph on the right.
+    const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
+    return {
+        left: selected,
+        right: side ? side.text.trim() : '',
+        from: startLine.from,
+        to: side ? side.line.to : endLine.to,
+    };
+}
+
+function bodyLooksLikeImageOnly(body) {
+    const lines = (body || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    return lines.length > 0 && lines.every(isWikiImageLine);
 }
 
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
@@ -952,28 +1021,36 @@ class BlockDndPlugin extends obsidian.Plugin {
                 pointer-events: auto !important;
                 position: relative;
                 z-index: 6;
+                width: 100%;
+                max-width: 100%;
             }
 
             .block-dnd-columns-root {
-                display: grid;
+                display: flex !important;
+                flex-direction: row;
+                flex-wrap: nowrap;
+                align-items: flex-start;
                 width: 100%;
+                max-width: 100%;
                 gap: 0;
-                align-items: stretch;
                 margin: 0.5em 0;
                 pointer-events: auto !important;
                 position: relative;
                 z-index: 7;
+                box-sizing: border-box;
             }
 
             .block-dnd-columns-root .block-dnd-col-cell {
                 min-width: 0;
-                overflow: visible;
+                max-width: 100%;
+                overflow: hidden;
                 box-sizing: border-box;
                 pointer-events: auto !important;
                 display: flex;
                 flex-direction: column;
                 align-items: stretch;
                 justify-content: flex-start;
+                align-self: flex-start;
             }
 
             .block-dnd-col-editor-wrap {
@@ -988,7 +1065,7 @@ class BlockDndPlugin extends obsidian.Plugin {
             .block-dnd-columns-root .block-dnd-col-preview {
                 display: block;
                 width: 100%;
-                min-height: 3.2em;
+                min-height: 1.5em;
                 margin: 0;
                 padding: 4px 0;
                 box-sizing: border-box;
@@ -998,18 +1075,11 @@ class BlockDndPlugin extends obsidian.Plugin {
                 color: var(--text-normal);
                 cursor: text;
                 pointer-events: auto !important;
+                overflow: hidden;
             }
 
             .block-dnd-columns-root .block-dnd-col-preview > :first-child {
                 margin-top: 0;
-            }
-
-            .block-dnd-columns-root .block-dnd-col-preview img,
-            .block-dnd-columns-root .block-dnd-col-preview .internal-embed,
-            .block-dnd-columns-root .block-dnd-col-preview .image-embed {
-                max-width: 100%;
-                height: auto;
-                vertical-align: top;
             }
 
             .block-dnd-columns-root .block-dnd-col-preview p {
@@ -1017,7 +1087,22 @@ class BlockDndPlugin extends obsidian.Plugin {
                 margin-block-end: 0.5em;
             }
 
-            .block-dnd-col-editor-wrap:not(.is-editing) .block-dnd-col-editor {
+            /* Keep embeds inside the column — do not let them drop below the row */
+            .block-dnd-columns-root .block-dnd-col-preview img,
+            .block-dnd-columns-root .block-dnd-col-preview .internal-embed,
+            .block-dnd-columns-root .block-dnd-col-preview .image-embed,
+            .block-dnd-columns-root .block-dnd-col-preview .media-embed {
+                display: block !important;
+                position: relative !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                float: none !important;
+                vertical-align: top;
+            }
+
+            .block-dnd-col-editor-wrap:not(.is-editing):not(.always-show-editor) .block-dnd-col-editor {
                 position: absolute;
                 width: 1px;
                 height: 1px;
@@ -1032,24 +1117,25 @@ class BlockDndPlugin extends obsidian.Plugin {
                 resize: none;
             }
 
-            .block-dnd-col-editor-wrap.is-editing .block-dnd-col-preview {
+            .block-dnd-col-editor-wrap.is-editing .block-dnd-col-preview,
+            .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-preview {
                 display: none;
             }
 
             .block-dnd-columns-root .block-dnd-col-editor {
                 display: block;
                 width: 100%;
-                flex: 1 1 auto;
+                flex: 0 0 auto;
                 min-height: 3.2em;
                 margin: 0;
-                padding: 4px 0;
+                padding: 6px 8px;
                 box-sizing: border-box;
                 font-family: var(--font-text-theme);
                 font-size: var(--font-text-size);
                 line-height: var(--line-height-normal);
                 color: var(--text-normal);
-                background: transparent;
-                border: none;
+                background: var(--background-primary-alt);
+                border: 1px solid var(--background-modifier-border);
                 border-radius: var(--radius-s, 4px);
                 resize: vertical;
                 outline: none;
@@ -1060,20 +1146,23 @@ class BlockDndPlugin extends obsidian.Plugin {
             }
 
             .block-dnd-columns-root .block-dnd-col-editor:focus {
-                box-shadow: inset 0 0 0 1px var(--background-modifier-border);
+                box-shadow: inset 0 0 0 1px var(--interactive-accent);
+                border-color: var(--interactive-accent);
                 background: var(--background-primary-alt);
             }
 
             .block-dnd-columns-root .block-dnd-col-gutter {
                 display: flex;
                 align-items: stretch;
+                align-self: stretch;
                 justify-content: center;
                 cursor: col-resize;
                 touch-action: none;
-                flex-shrink: 0;
+                flex: 0 0 auto;
                 position: relative;
                 opacity: 0;
                 transition: opacity 0.12s ease;
+                min-height: 3.2em;
             }
 
             .block-dnd-columns-root:hover .block-dnd-col-gutter,
@@ -2147,30 +2236,29 @@ class BlockDndPlugin extends obsidian.Plugin {
         }
 
         const doc = cmView.state.doc;
-        const from = doc.line(blockStartLine + 1).from;
+        let from = doc.line(blockStartLine + 1).from;
         let to = doc.line(blockEndLine + 1).to;
-        const extracted = cmView.state.sliceDoc(from, to);
-
-        // "1 Column" = half-width layout (2 slots). Put the selected block on the
-        // left; if the next simple paragraph is beside it in the note, pull that
-        // text into the right column so it sits at the top next to images/embeds.
-        let sideText = '';
-        if (columnCount === 1) {
-            const side = findFollowingSideParagraph(doc, blockEndLine);
-            if (side) {
-                sideText = side.text;
-                to = side.line.to;
-            }
-        }
 
         const id = randomBlockId();
         const n = columnCount === 1 ? 2 : columnCount;
         const widths = equalWidthPercents(n);
-        const bodies = Array.from({ length: n }, (_, i) => {
-            if (i === 0) return extracted;
-            if (columnCount === 1) return sideText;
-            return `_Column ${i + 1}_`;
-        });
+        let bodies;
+
+        if (columnCount === 1) {
+            // Half-width row: image (or block) on the left, text on the right,
+            // top-aligned and inline — never stacked above/below each other.
+            const pair = resolveOneColumnPair(doc, blockStartLine, blockEndLine);
+            from = pair.from;
+            to = pair.to;
+            bodies = [pair.left, pair.right];
+        } else {
+            const extracted = cmView.state.sliceDoc(from, to);
+            bodies = Array.from({ length: n }, (_, i) => {
+                if (i === 0) return extracted;
+                return `_Column ${i + 1}_`;
+            });
+        }
+
         const meta = columnCount === 1 ? { id, n, widths, singleCol: true } : { id, n, widths };
         const inner = serializeColumnFence(meta, bodies);
         const oldSlice = cmView.state.sliceDoc(from, to);
@@ -2327,20 +2415,29 @@ class BlockDndPlugin extends obsidian.Plugin {
         const root = document.createElement('div');
         root.className = 'block-dnd-columns-root';
         root.dataset.blockDndId = meta.id;
+        if (meta.singleCol) root.classList.add('block-dnd-single-col');
         el.appendChild(root);
 
         const gutterTrackPx = this.isMobile ? 16 : 14;
 
+        // Flex row keeps image + text truly inline and top-aligned (grid was
+        // letting embeds visually drop below the row in Live Preview).
         const applyTracks = (perc) => {
-            const parts = [];
-            for (let i = 0; i < n; i++) {
-                parts.push(`${perc[i]}fr`);
-                if (i < n - 1) parts.push(`${gutterTrackPx}px`);
-            }
-            root.style.gridTemplateColumns = parts.join(' ');
+            const cells = root.querySelectorAll(':scope > .block-dnd-col-cell');
+            const gutters = root.querySelectorAll(':scope > .block-dnd-col-gutter');
+            cells.forEach((cell, idx) => {
+                if (!(cell instanceof HTMLElement)) return;
+                const pct = perc[idx] ?? 0;
+                cell.style.flex = `${pct} 1 0`;
+                cell.style.width = `${pct}%`;
+                cell.style.maxWidth = `${pct}%`;
+            });
+            gutters.forEach((gutter) => {
+                if (!(gutter instanceof HTMLElement)) return;
+                gutter.style.flex = `0 0 ${gutterTrackPx}px`;
+                gutter.style.width = `${gutterTrackPx}px`;
+            });
         };
-
-        applyTracks(widths);
 
         for (let i = 0; i < n; i++) {
             const cell = document.createElement('div');
@@ -2353,13 +2450,23 @@ class BlockDndPlugin extends obsidian.Plugin {
             wrap.className = 'block-dnd-col-editor-wrap';
             cell.appendChild(wrap);
 
+            const bodyText = bodies[i] ?? '';
+            const imageOnly = bodyLooksLikeImageOnly(bodyText);
+            // Half-width text slot: always show a resizable text box at the top
+            // beside the image (drag the bottom edge to grow downward).
+            const alwaysShowEditor = !!meta.singleCol && i > 0 && !imageOnly;
+            if (alwaysShowEditor) wrap.classList.add('always-show-editor');
+
             const previewEl = document.createElement('div');
             previewEl.className = 'block-dnd-col-preview markdown-rendered';
 
             const ta = document.createElement('textarea');
             ta.className = 'block-dnd-col-editor';
-            ta.value = bodies[i] ?? '';
-            ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
+            ta.value = bodyText;
+            ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
+            if (alwaysShowEditor) {
+                ta.style.minHeight = '4.5em';
+            }
             ta.spellcheck = true;
             ta.autocomplete = 'off';
             ta.setAttribute('aria-label', `Column ${i + 1}`);
@@ -2375,6 +2482,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                 wrap.classList.add('is-editing');
             };
             const leaveEditMode = () => {
+                if (alwaysShowEditor) return;
                 wrap.classList.remove('is-editing');
             };
 
@@ -2487,7 +2595,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                 previewEl,
                 markdownChild,
                 refreshRows: () => {
-                    ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
+                    ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
                 },
             });
 
@@ -2572,6 +2680,8 @@ class BlockDndPlugin extends obsidian.Plugin {
                 });
             }
         }
+
+        applyTracks(widths);
 
         const plugin = this;
         const sourcePath = ctx.sourcePath;
