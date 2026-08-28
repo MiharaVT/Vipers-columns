@@ -23,11 +23,34 @@
     align-items: flex-start;
 }
 
+.block-dnd-columns-root.block-dnd-single-col {
+    align-items: stretch !important;
+}
+
 .block-dnd-col-cell {
     justify-content: flex-start;
     align-self: flex-start;
     overflow: hidden;
     min-width: 0;
+}
+
+.block-dnd-columns-root.block-dnd-single-col .block-dnd-col-cell {
+    align-self: stretch !important;
+}
+
+.block-dnd-columns-root.block-dnd-single-col .block-dnd-col-editor-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    gap: 0;
+}
+
+.block-dnd-columns-root.block-dnd-single-col .always-show-editor .block-dnd-col-editor {
+    flex: 1 1 auto !important;
+    align-self: stretch;
+    min-height: 0 !important;
+    resize: none !important;
+    overflow: auto !important;
 }
 
 .block-dnd-col-cell.is-editing-cell,
