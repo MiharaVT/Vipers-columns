@@ -44,6 +44,22 @@
     vertical-align: top;
 }
 
+.block-dnd-col-editor-wrap.image-preview-cell .block-dnd-col-preview {
+    min-height: 3em;
+}
+
+.block-dnd-col-image-placeholder {
+    display: block;
+    width: 100%;
+    min-height: 3em;
+    padding: 8px;
+    box-sizing: border-box;
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    word-break: break-all;
+}
+
 .block-dnd-columns-root:focus-within {
     outline: none;
 }
