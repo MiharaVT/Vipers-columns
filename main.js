@@ -1830,7 +1830,8 @@ class BlockDndPlugin extends obsidian.Plugin {
                 font-size: var(--font-text-size);
                 line-height: var(--line-height-normal);
                 color: var(--text-normal);
-                background: var(--background-primary-alt);
+                /* Always use the glass/transparent panel look (not only on hover). */
+                background: color-mix(in srgb, var(--background-secondary) 42%, transparent);
                 border: 1px solid var(--background-modifier-border);
                 border-radius: var(--radius-s, 4px);
                 resize: vertical;
@@ -1839,6 +1840,15 @@ class BlockDndPlugin extends obsidian.Plugin {
                 cursor: text;
                 -webkit-user-select: text;
                 user-select: text;
+            }
+
+            @supports not (background: color-mix(in srgb, red 50%, transparent)) {
+                .block-dnd-columns-root .block-dnd-col-editor {
+                    background: rgba(0, 0, 0, 0.28);
+                }
+                .theme-light .block-dnd-columns-root .block-dnd-col-editor {
+                    background: rgba(255, 255, 255, 0.4);
+                }
             }
 
             /* Explicitly undo the clipped 1px hide so text cannot vanish on click-to-edit */
@@ -1857,6 +1867,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                 pointer-events: auto !important;
                 resize: vertical !important;
                 border: 1px solid var(--background-modifier-border);
+                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
             }
 
             .block-dnd-col-cell.is-editing-cell,
@@ -1865,10 +1876,31 @@ class BlockDndPlugin extends obsidian.Plugin {
                 overflow: visible;
             }
 
+            .block-dnd-columns-root .block-dnd-col-editor:hover {
+                /* Keep the same transparency while hovered — do not go opaque. */
+                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
+            }
+
             .block-dnd-columns-root .block-dnd-col-editor:focus {
                 box-shadow: inset 0 0 0 1px var(--interactive-accent);
                 border-color: var(--interactive-accent);
-                background: var(--background-primary-alt);
+                /* Keep the same transparency while focused — do not go opaque. */
+                background: color-mix(in srgb, var(--background-secondary) 42%, transparent) !important;
+            }
+
+            @supports not (background: color-mix(in srgb, red 50%, transparent)) {
+                .block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
+                .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor,
+                .block-dnd-columns-root .block-dnd-col-editor:hover,
+                .block-dnd-columns-root .block-dnd-col-editor:focus {
+                    background: rgba(0, 0, 0, 0.28) !important;
+                }
+                .theme-light .block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
+                .theme-light .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor,
+                .theme-light .block-dnd-columns-root .block-dnd-col-editor:hover,
+                .theme-light .block-dnd-columns-root .block-dnd-col-editor:focus {
+                    background: rgba(255, 255, 255, 0.4) !important;
+                }
             }
 
             .block-dnd-columns-root .block-dnd-col-gutter {

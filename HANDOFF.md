@@ -1,12 +1,12 @@
 # Handoff: Viper's Columns (MiharaVT/Vipers-columns)
 
-**Status:** Working as of 2026-08-28. User confirmed **1 Column** keeps the image visible beside the text box after v1.0.5. **v1.0.6** fixes 2+ column click-to-edit / Enter / Tab. **v1.0.7** makes the 1 Column text box match the image height (like the gutter).
+**Status:** Working as of 2026-08-28. User confirmed **1 Column** keeps the image visible beside the text box after v1.0.5. **v1.0.6** fixes 2+ column click-to-edit / Enter / Tab. **v1.0.7** makes the 1 Column text box match the image height (like the gutter). **v1.0.8** keeps the translucent glass column look always (not only on hover).
 
 **Repo:** https://github.com/MiharaVT/Vipers-columns  
-**Default branch:** `main` (PRs #1–#8 merged; image-height text box lands as **PR #9**)  
+**Default branch:** `main` (PRs #1–#9 merged; always-transparent columns lands as **PR #10**)  
 **Plugin id:** `vipers-columns`  
 **Display name:** Viper's Columns  
-**Current version:** `1.0.7` (`manifest.json`)
+**Current version:** `1.0.8` (`manifest.json`)
 
 ---
 
@@ -36,6 +36,7 @@ Files: `main.js`, `manifest.json`, `styles.css` (`data.json` is optional default
 | [#7](https://github.com/MiharaVT/Vipers-columns/pull/7) | — | Add this `HANDOFF.md` + always-open-next-PR skill (docs) |
 | [#8](https://github.com/MiharaVT/Vipers-columns/pull/8) | **1.0.6** | 2+ column text stays on click; Enter = newline; Tab exits to the note |
 | [#9](https://github.com/MiharaVT/Vipers-columns/pull/9) | **1.0.7** | 1 Column text box height matches the image (same as the gutter) |
+| [#10](https://github.com/MiharaVT/Vipers-columns/pull/10) | **1.0.8** | Column panels always use the translucent glass look (not only on hover) |
 
 ---
 
@@ -102,7 +103,7 @@ Do not restore Enter-to-next-column / Enter-to-exit-fence.
 ## Conventions for future agents
 
 1. **Always open the next PR** when editing this existing repo. If the last PR was `#N`, ship the update as `#N+1` (new branch from `main`). See `.cursor/skills/always-open-pr/SKILL.md`.
-2. **Bump `manifest.json` version on every plugin code PR** (next plugin bump would be `1.0.8`).
+2. **Bump `manifest.json` version on every plugin code PR** (next plugin bump would be `1.0.9`).
 3. New work: branch `cursor/<descriptive-name>-150f` (or the suffix this run specifies) off `main`.
 4. Do not rebrand as Zotion; product name is **Viper's Columns** / id `vipers-columns`.
 5. Do not leave handoffs only in an agent store — put them in the repo and open a PR.
