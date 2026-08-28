@@ -31,6 +31,7 @@ const {
     isColumnPlainEnterKey,
     isColumnTabKey,
     bdndSyncSingleColTextHeight,
+    insertNewlineInColumnTextarea,
 } = plugin._columnEditTest;
 
 function assert(cond, msg) {
@@ -94,6 +95,23 @@ assert(!columnBodiesEqual(null, ['a']), 'null prev');
     assert(important['min-height'] === '220px', 'min-height should match image');
     assert(important['max-height'] === '220px', 'max-height should match image');
     assert(important.resize === 'none', 'single-col text box should not be independently resizable');
+}
+
+{
+    function FakeTextArea() {}
+    global.HTMLTextAreaElement = FakeTextArea;
+    const ta = new FakeTextArea();
+    ta.value = 'ab';
+    ta.selectionStart = 1;
+    ta.selectionEnd = 1;
+    ta.setSelectionRange = (s, e) => {
+        ta.selectionStart = s;
+        ta.selectionEnd = e;
+    };
+    ta.dispatchEvent = () => true;
+    insertNewlineInColumnTextarea(ta);
+    assert(ta.value === 'a\nb', `Enter should insert newline in-panel (got ${JSON.stringify(ta.value)})`);
+    assert(ta.selectionStart === 2 && ta.selectionEnd === 2, 'caret should sit after the newline');
 }
 
 console.log('test-column-keys: ok');
