@@ -16,15 +16,30 @@
     box-sizing: border-box;
 }
 
+.block-dnd-columns-root {
+    display: flex !important;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+}
+
 .block-dnd-col-cell {
     justify-content: flex-start;
+    align-self: flex-start;
+    overflow: hidden;
+    min-width: 0;
 }
 
 .block-dnd-col-preview img,
 .block-dnd-col-preview .internal-embed,
-.block-dnd-col-preview .image-embed {
-    max-width: 100%;
-    height: auto;
+.block-dnd-col-preview .image-embed,
+.block-dnd-col-preview .media-embed {
+    display: block !important;
+    position: relative !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    float: none !important;
     vertical-align: top;
 }
 
