@@ -1174,6 +1174,116 @@ function bdndAppendResolvedImage(app, el, imagePath, sourcePath, width, height) 
     return finishImg(img);
 }
 
+/**
+ * 1 Column: make the side text box the same height as the image
+ * (same vertical span as the stretchy gutter between them).
+ */
+function bdndSyncSingleColTextHeight(root) {
+    if (!(root instanceof HTMLElement) || !root.classList.contains('block-dnd-single-col')) return;
+    const imagePreview = root.querySelector(
+        ':scope > .block-dnd-col-cell .image-preview-cell .block-dnd-col-preview'
+    );
+    const textEditor = root.querySelector(
+        ':scope > .block-dnd-col-cell .always-show-editor .block-dnd-col-editor'
+    );
+    if (!(imagePreview instanceof HTMLElement) || !(textEditor instanceof HTMLTextAreaElement)) return;
+
+    const img = imagePreview.querySelector('img');
+    let h = 0;
+    if (img instanceof HTMLImageElement) {
+        h = img.offsetHeight || img.getBoundingClientRect().height || 0;
+    }
+    if (h < 1) {
+        h = imagePreview.offsetHeight || imagePreview.getBoundingClientRect().height || 0;
+    }
+    if (h < 1) return;
+
+    const px = `${Math.round(h)}px`;
+    textEditor.style.boxSizing = 'border-box';
+    // Beat the general `min-height: 3.2em !important` editor rule.
+    textEditor.style.setProperty('height', px, 'important');
+    textEditor.style.setProperty('min-height', px, 'important');
+    textEditor.style.setProperty('max-height', px, 'important');
+    textEditor.style.setProperty('resize', 'none', 'important');
+    textEditor.style.setProperty('overflow', 'auto', 'important');
+}
+
+function bdndAttachSingleColHeightSync(root, hostChild) {
+    if (!(root instanceof HTMLElement) || !root.classList.contains('block-dnd-single-col')) return;
+
+    const sync = () => bdndSyncSingleColTextHeight(root);
+    let raf = null;
+    const schedule = () => {
+        if (raf != null) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+            raf = null;
+            sync();
+        });
+    };
+
+    sync();
+    // Image decode / layout often settles after the first paint.
+    window.setTimeout(sync, 0);
+    window.setTimeout(sync, 120);
+    window.setTimeout(sync, 400);
+
+    const imagePreview = root.querySelector(
+        ':scope > .block-dnd-col-cell .image-preview-cell .block-dnd-col-preview'
+    );
+    const observed = new Set();
+    const ro =
+        typeof ResizeObserver !== 'undefined'
+            ? new ResizeObserver(() => {
+                  schedule();
+              })
+            : null;
+
+    const watchEl = (el) => {
+        if (!(el instanceof Element) || !ro || observed.has(el)) return;
+        observed.add(el);
+        try {
+            ro.observe(el);
+        } catch {
+            /* noop */
+        }
+        if (el instanceof HTMLImageElement) {
+            el.addEventListener('load', schedule);
+        }
+    };
+
+    watchEl(root);
+    if (imagePreview) {
+        watchEl(imagePreview);
+        imagePreview.querySelectorAll('img').forEach((img) => watchEl(img));
+    }
+
+    const mo =
+        imagePreview && typeof MutationObserver !== 'undefined'
+            ? new MutationObserver(() => {
+                  if (imagePreview) {
+                      imagePreview.querySelectorAll('img').forEach((img) => watchEl(img));
+                  }
+                  schedule();
+              })
+            : null;
+    if (mo && imagePreview) {
+        mo.observe(imagePreview, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'src', 'width', 'height', 'class'],
+        });
+    }
+
+    if (hostChild && typeof hostChild.register === 'function') {
+        hostChild.register(() => {
+            if (raf != null) cancelAnimationFrame(raf);
+            if (ro) ro.disconnect();
+            if (mo) mo.disconnect();
+        });
+    }
+}
+
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
 function wrapColumnFenceInner(inner, oldSliceEndsWithNewline) {
     let fence = '```' + BLOCK_DND_COLUMNS_LANG + '\n' + inner + '\n```';
@@ -1579,6 +1689,11 @@ class BlockDndPlugin extends obsidian.Plugin {
                 box-sizing: border-box;
             }
 
+            /* 1 Column: stretch like the gutter so the text box matches image height */
+            .block-dnd-columns-root.block-dnd-single-col {
+                align-items: stretch !important;
+            }
+
             .block-dnd-columns-root .block-dnd-col-cell {
                 min-width: 0;
                 max-width: 100%;
@@ -1590,6 +1705,29 @@ class BlockDndPlugin extends obsidian.Plugin {
                 align-items: stretch;
                 justify-content: flex-start;
                 align-self: flex-start;
+            }
+
+            .block-dnd-columns-root.block-dnd-single-col .block-dnd-col-cell {
+                align-self: stretch !important;
+            }
+
+            .block-dnd-columns-root.block-dnd-single-col .block-dnd-col-editor-wrap {
+                flex: 1 1 auto;
+                min-height: 0;
+                height: 100%;
+                gap: 0;
+            }
+
+            .block-dnd-columns-root.block-dnd-single-col .image-preview-cell .block-dnd-col-preview {
+                padding: 0;
+            }
+
+            .block-dnd-columns-root.block-dnd-single-col .always-show-editor .block-dnd-col-editor {
+                flex: 1 1 auto !important;
+                align-self: stretch;
+                min-height: 0 !important;
+                resize: none !important;
+                overflow: auto !important;
             }
 
             .block-dnd-col-editor-wrap {
@@ -3274,6 +3412,8 @@ class BlockDndPlugin extends obsidian.Plugin {
             });
         };
 
+        let syncHostChild = null;
+
         for (let i = 0; i < n; i++) {
             const cell = document.createElement('div');
             cell.className = 'block-dnd-col-cell';
@@ -3290,13 +3430,10 @@ class BlockDndPlugin extends obsidian.Plugin {
             // from a right-clicked Live Preview embed (body markdown alone is not enough).
             const metaImagePath = i === 0 && meta.imagePath ? String(meta.imagePath) : '';
             const imageOnly = !!metaImagePath || bodyLooksLikeImageOnly(bodyText);
-            // Half-width text slot: always show a resizable text box at the top
-            // beside the image (drag the bottom edge to grow downward).
             // Image slots stay in preview mode so the picture does not "disappear"
             // into raw ![[...]] source on click.
             // Text cells always show a real textarea (same as 1 Column's side box).
-            // Preview-only click-to-edit hid the rendered text and often unmounted
-            // the widget, so the cell looked empty.
+            // 1 Column text box height is synced to the image (see bdndSyncSingleColTextHeight).
             const alwaysShowEditor = !imageOnly;
             if (alwaysShowEditor) wrap.classList.add('always-show-editor');
             if (imageOnly) wrap.classList.add('image-preview-cell');
@@ -3319,9 +3456,16 @@ class BlockDndPlugin extends obsidian.Plugin {
             const ta = document.createElement('textarea');
             ta.className = 'block-dnd-col-editor';
             ta.value = bodyText || (metaImagePath ? `![[${metaImagePath}${meta.imageWidth ? '|' + meta.imageWidth : ''}]]` : '');
-            ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
-            if (alwaysShowEditor) {
-                ta.style.minHeight = '4.5em';
+            if (alwaysShowEditor && meta.singleCol) {
+                // Avoid rows-based intrinsic height fighting image-height sync.
+                ta.rows = 1;
+                ta.style.resize = 'none';
+                ta.style.overflow = 'auto';
+            } else {
+                ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
+                if (alwaysShowEditor) {
+                    ta.style.minHeight = '4.5em';
+                }
             }
             ta.spellcheck = true;
             ta.autocomplete = 'off';
@@ -3333,6 +3477,7 @@ class BlockDndPlugin extends obsidian.Plugin {
             } else if (typeof this.addChild === 'function') {
                 this.addChild(markdownChild);
             }
+            syncHostChild = markdownChild;
 
             const enterEditMode = () => {
                 if (imageOnly) return;
@@ -3435,7 +3580,13 @@ class BlockDndPlugin extends obsidian.Plugin {
                 previewEl,
                 markdownChild,
                 refreshRows: () => {
+                    if (meta.singleCol && alwaysShowEditor) {
+                        ta.rows = 1;
+                        bdndSyncSingleColTextHeight(root);
+                        return;
+                    }
                     ta.rows = Math.min(14, Math.max(alwaysShowEditor ? 4 : 3, (ta.value || '').split('\n').length));
+                    if (meta.singleCol) bdndSyncSingleColTextHeight(root);
                 },
             });
 
@@ -3480,6 +3631,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                         perc[gi + 1] = b;
                         perc = normalizePercents(perc);
                         applyTracks(perc);
+                        if (meta.singleCol) bdndSyncSingleColTextHeight(root);
                     };
 
                     const onUp = async () => {
@@ -3522,6 +3674,10 @@ class BlockDndPlugin extends obsidian.Plugin {
         }
 
         applyTracks(widths);
+
+        if (meta.singleCol) {
+            bdndAttachSingleColHeightSync(root, syncHostChild);
+        }
 
         const plugin = this;
         const sourcePath = ctx.sourcePath;
@@ -3793,4 +3949,5 @@ BlockDndPlugin._columnEditTest = {
     columnBodiesEqual,
     isColumnPlainEnterKey,
     isColumnTabKey,
+    bdndSyncSingleColTextHeight,
 };

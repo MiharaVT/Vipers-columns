@@ -26,7 +26,12 @@ Module._load = function (request, parent, isMain) {
 };
 
 const plugin = require('./main.js');
-const { columnBodiesEqual, isColumnPlainEnterKey, isColumnTabKey } = plugin._columnEditTest;
+const {
+    columnBodiesEqual,
+    isColumnPlainEnterKey,
+    isColumnTabKey,
+    bdndSyncSingleColTextHeight,
+} = plugin._columnEditTest;
 
 function assert(cond, msg) {
     if (!cond) throw new Error(msg);
@@ -48,5 +53,47 @@ assert(columnBodiesEqual([''], ['']), 'empty bodies');
 assert(!columnBodiesEqual(['a', 'b'], ['a', 'c']), 'different bodies');
 assert(!columnBodiesEqual(['a'], ['a', 'b']), 'length mismatch');
 assert(!columnBodiesEqual(null, ['a']), 'null prev');
+
+// Minimal DOM mock for 1 Column image-height sync
+{
+    function FakeEl() {}
+    function FakeTextArea() {}
+    function FakeImg() {}
+    global.HTMLElement = FakeEl;
+    global.HTMLTextAreaElement = FakeTextArea;
+    global.HTMLImageElement = FakeImg;
+
+    const important = {};
+    const textEditor = new FakeTextArea();
+    textEditor.style = {
+        boxSizing: '',
+        setProperty(name, value, priority) {
+            if (priority === 'important') important[name] = value;
+        },
+    };
+
+    const img = new FakeImg();
+    img.offsetHeight = 220;
+    img.getBoundingClientRect = () => ({ height: 220 });
+
+    const imagePreview = new FakeEl();
+    imagePreview.offsetHeight = 220;
+    imagePreview.getBoundingClientRect = () => ({ height: 220 });
+    imagePreview.querySelector = (sel) => (sel === 'img' ? img : null);
+
+    const root = new FakeEl();
+    root.classList = { contains: (c) => c === 'block-dnd-single-col' };
+    root.querySelector = (sel) => {
+        if (String(sel).includes('image-preview-cell')) return imagePreview;
+        if (String(sel).includes('always-show-editor')) return textEditor;
+        return null;
+    };
+
+    bdndSyncSingleColTextHeight(root);
+    assert(important.height === '220px', `text box height should match image (got ${important.height})`);
+    assert(important['min-height'] === '220px', 'min-height should match image');
+    assert(important['max-height'] === '220px', 'max-height should match image');
+    assert(important.resize === 'none', 'single-col text box should not be independently resizable');
+}
 
 console.log('test-column-keys: ok');
