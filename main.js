@@ -343,10 +343,10 @@ function bdndAttachColumnZotionCompat(ctx) {
         // Wiki embeds inside column code-block widgets often render blank via
         // MarkdownRenderer. Draw image-only bodies (and image fallbacks) directly.
         if (bodyLooksLikeImageOnly(md)) {
-            const n = bdndRenderWikiImagesDirect(app, md, previewEl, sourcePath);
-            if (n === 0) {
+            bdndRenderWikiImagesDirect(app, md, previewEl, sourcePath);
+            if (!previewEl.firstChild) {
                 const dv = document.createElement('div');
-                dv.className = 'block-dnd-col-preview-fallback';
+                dv.className = 'block-dnd-col-image-placeholder';
                 dv.textContent = md.trim() || '[Image unavailable]';
                 previewEl.appendChild(dv);
             }
@@ -670,87 +670,95 @@ function findAdjacentMatchingLine(doc, fromLine0, direction, matchFn) {
 }
 
 /**
- * Build a half-width (image | text) pair for "1 Column".
- * Handles cursor on the image (text below), on the text (image above),
- * or a single line that already mixes both.
+ * Find a wiki image line near a document line (Live Preview often resolves the
+ * cursor to a neighbor line of the embed widget).
  */
-function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0) {
-    const startLine = doc.line(blockStartLine0 + 1);
-    const endLine = doc.line(blockEndLine0 + 1);
+function findWikiImageLineNear(doc, centerLine0, radius = 5) {
+    if (typeof centerLine0 !== 'number' || centerLine0 < 0) return null;
+    for (let d = 0; d <= radius; d++) {
+        const candidates = d === 0 ? [centerLine0] : [centerLine0 - d, centerLine0 + d];
+        for (const line0 of candidates) {
+            if (line0 < 0 || line0 >= doc.lines) continue;
+            const line = doc.line(line0 + 1);
+            if (isWikiImageLine(line.text)) {
+                return { line0, line, imageMd: line.text.trim(), sideText: '' };
+            }
+            const mixed = splitMixedImageText(line.text);
+            if (mixed?.imageMd) {
+                return {
+                    line0,
+                    line,
+                    imageMd: mixed.imageMd,
+                    sideText: mixed.sideText || '',
+                };
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Build a half-width (image | text) pair for "1 Column".
+ * Image-first: locate a nearby ![[...]] in the document and always keep it on
+ * the left so the replace range cannot delete the picture.
+ */
+function resolveOneColumnPair(doc, blockStartLine0, blockEndLine0, cursorLine0) {
+    const centers = [];
+    if (typeof cursorLine0 === 'number') centers.push(cursorLine0);
+    if (typeof blockStartLine0 === 'number') centers.push(blockStartLine0);
+    if (typeof blockEndLine0 === 'number') centers.push(blockEndLine0);
+    // Also search the midpoint of the DOM block range.
+    if (
+        typeof blockStartLine0 === 'number' &&
+        typeof blockEndLine0 === 'number' &&
+        blockEndLine0 !== blockStartLine0
+    ) {
+        centers.push(Math.round((blockStartLine0 + blockEndLine0) / 2));
+    }
+
+    let img = null;
+    for (const c of centers) {
+        img = findWikiImageLineNear(doc, c, 6);
+        if (img) break;
+    }
+
+    if (img) {
+        let right = img.sideText || '';
+        let from = img.line.from;
+        let to = img.line.to;
+
+        if (!right) {
+            const after = findAdjacentMatchingLine(doc, img.line0, 'after', isSimpleSideParagraphLine);
+            if (after) {
+                right = after.text.trim();
+                to = after.line.to;
+            } else {
+                const before = findAdjacentMatchingLine(doc, img.line0, 'before', isSimpleSideParagraphLine);
+                if (before) {
+                    right = before.text.trim();
+                    from = before.line.from;
+                }
+            }
+        }
+
+        return {
+            left: img.imageMd,
+            right,
+            from,
+            to,
+        };
+    }
+
+    // No image nearby — only wrap the selected block (do not expand in ways that
+    // could delete a distant embed).
+    const startLine = doc.line(Math.max(0, blockStartLine0) + 1);
+    const endLine = doc.line(Math.max(blockStartLine0, blockEndLine0) + 1);
     const selected = doc.sliceString(startLine.from, endLine.to);
-    const selectedTrim = selected.trim();
-
-    // Same line already mixes text + image — never keep them concatenated.
-    const mixed = splitMixedImageText(selectedTrim);
-    if (mixed && (mixed.sideText || selectedTrim !== mixed.imageMd)) {
-        if (mixed.sideText) {
-            return {
-                left: mixed.imageMd,
-                right: mixed.sideText,
-                from: startLine.from,
-                to: endLine.to,
-            };
-        }
-    }
-
-    // Cursor/block is an image (or embed line): pull following text into the right slot.
-    if (isWikiImageLine(selectedTrim)) {
-        const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
-        return {
-            left: selectedTrim,
-            right: side ? side.text.trim() : '',
-            from: startLine.from,
-            to: side ? side.line.to : endLine.to,
-        };
-    }
-
-    // Cursor/block is plain text: pull a preceding image into the left slot.
-    if (isSimpleSideParagraphLine(selectedTrim)) {
-        const img = findAdjacentMatchingLine(doc, blockStartLine0, 'before', isWikiImageLine);
-        if (img) {
-            return {
-                left: img.text.trim(),
-                right: selectedTrim,
-                from: img.line.from,
-                to: endLine.to,
-            };
-        }
-        const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
-        return {
-            left: selectedTrim,
-            right: side ? side.text.trim() : '',
-            from: startLine.from,
-            to: side ? side.line.to : endLine.to,
-        };
-    }
-
-    // Selection may be multi-line (image + text). Split the first embed from the rest.
-    {
-        const re = new RegExp(BDND_WIKI_EMBED_RE_SOURCE);
-        const m = re.exec(selected);
-        if (m) {
-            const hit = bdndWikiMatchFromExec(m);
-            const sideText = (selected.slice(0, hit.fullFrom) + selected.slice(hit.fullTo))
-                .split('\n')
-                .map((l) => l.trim())
-                .filter(Boolean)
-                .join('\n');
-            return {
-                left: hit.raw,
-                right: sideText,
-                from: startLine.from,
-                to: endLine.to,
-            };
-        }
-    }
-
-    // Fallback: selected block on the left; following simple paragraph on the right.
-    const side = findAdjacentMatchingLine(doc, blockEndLine0, 'after', isSimpleSideParagraphLine);
     return {
         left: selected,
-        right: side ? side.text.trim() : '',
+        right: '',
         from: startLine.from,
-        to: side ? side.line.to : endLine.to,
+        to: endLine.to,
     };
 }
 
@@ -758,11 +766,62 @@ function bodyLooksLikeImageOnly(body) {
     const lines = (body || '').split('\n').map((l) => l.trim()).filter(Boolean);
     if (!lines.length) return false;
     if (lines.every(isWikiImageLine)) return true;
-    // A single wiki embed anywhere with no other non-empty prose
     const embeds = (body || '').match(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g')) || [];
     if (embeds.length === 0) return false;
     const without = (body || '').replace(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g'), '').trim();
     return without.length === 0;
+}
+
+/** Resolve a wiki link path to a vault image file (handles +/ prefixes, basenames). */
+function bdndResolveImageFile(app, linkPathRaw, sourcePath) {
+    const raw = (linkPathRaw || '').trim();
+    if (!raw || !app) return null;
+
+    const candidates = [];
+    const push = (p) => {
+        if (p && !candidates.includes(p)) candidates.push(p);
+    };
+    push(raw);
+    push(raw.replace(/^\+\//, ''));
+    push(raw.replace(/^\//, ''));
+    try {
+        push(obsidian.normalizePath(raw));
+        push(obsidian.normalizePath(raw.replace(/^\+\//, '')));
+    } catch {
+        /* noop */
+    }
+    const base = raw.split('/').pop();
+    if (base) push(base);
+
+    for (const c of candidates) {
+        try {
+            const dest = app.metadataCache.getFirstLinkpathDest(c, sourcePath || '');
+            if (dest instanceof obsidian.TFile && bdndIsPreviewImageExt(dest.extension)) return dest;
+        } catch {
+            /* noop */
+        }
+        try {
+            const af = app.vault.getAbstractFileByPath(obsidian.normalizePath(c));
+            if (af instanceof obsidian.TFile && bdndIsPreviewImageExt(af.extension)) return af;
+        } catch {
+            /* noop */
+        }
+    }
+
+    if (base) {
+        try {
+            const files = app.vault.getFiles();
+            const hits = files.filter(
+                (f) =>
+                    bdndIsPreviewImageExt(f.extension) &&
+                    (f.name === base || f.path === raw || f.path.endsWith('/' + base))
+            );
+            if (hits.length >= 1) return hits[0];
+        } catch {
+            /* noop */
+        }
+    }
+    return null;
 }
 
 /**
@@ -775,8 +834,13 @@ function bdndRenderWikiImagesDirect(app, md, el, sourcePath) {
     let rendered = 0;
     while ((match = re.exec(md || '')) !== null) {
         const hit = bdndWikiMatchFromExec(match);
-        const dest = app.metadataCache.getFirstLinkpathDest(hit.linkPathRaw, sourcePath || '');
-        if (!(dest instanceof obsidian.TFile) || !bdndIsPreviewImageExt(dest.extension)) {
+        const dest = bdndResolveImageFile(app, hit.linkPathRaw, sourcePath);
+        if (!(dest instanceof obsidian.TFile)) {
+            // Keep a visible placeholder so the embed is not "gone".
+            const ph = document.createElement('div');
+            ph.className = 'block-dnd-col-image-placeholder';
+            ph.textContent = hit.raw;
+            el.appendChild(ph);
             continue;
         }
         const img = document.createElement('img');
@@ -786,6 +850,10 @@ function bdndRenderWikiImagesDirect(app, md, el, sourcePath) {
         try {
             img.src = app.vault.getResourcePath(dest);
         } catch {
+            const ph = document.createElement('div');
+            ph.className = 'block-dnd-col-image-placeholder';
+            ph.textContent = hit.raw;
+            el.appendChild(ph);
             continue;
         }
         if (hit.width && hit.width > 0) img.style.width = `${hit.width}px`;
@@ -798,6 +866,20 @@ function bdndRenderWikiImagesDirect(app, md, el, sourcePath) {
         rendered++;
     }
     return rendered;
+}
+
+/** Ensure every wiki embed in oldSlice still appears in column bodies. */
+function bdndPreserveEmbedsInBodies(oldSlice, bodies) {
+    const embeds = oldSlice.match(new RegExp(BDND_WIKI_EMBED_RE_SOURCE, 'g')) || [];
+    if (!embeds.length) return bodies;
+    const next = bodies.slice();
+    let joined = next.join('\n');
+    for (const emb of embeds) {
+        if (joined.includes(emb)) continue;
+        next[0] = next[0] ? `${emb}\n${next[0]}` : emb;
+        joined = next.join('\n');
+    }
+    return next;
 }
 
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
@@ -1222,7 +1304,20 @@ class BlockDndPlugin extends obsidian.Plugin {
 
             .block-dnd-col-editor-wrap.image-preview-cell .block-dnd-col-preview {
                 cursor: default;
-                min-height: 0;
+                min-height: 3em;
+            }
+
+            .block-dnd-columns-root .block-dnd-col-image-placeholder {
+                display: block;
+                width: 100%;
+                min-height: 3em;
+                padding: 8px;
+                box-sizing: border-box;
+                border: 1px dashed var(--background-modifier-border);
+                border-radius: var(--radius-s, 4px);
+                color: var(--text-muted);
+                font-size: var(--font-ui-smaller);
+                word-break: break-all;
             }
 
             .block-dnd-col-editor-wrap:not(.is-editing):not(.always-show-editor) .block-dnd-col-editor {
@@ -2335,10 +2430,11 @@ class BlockDndPlugin extends obsidian.Plugin {
 
         if (blockIdx === null) return;
 
-        this.replaceBlockWithColumns(blockIdx, columnCount);
+        const cursorLine0 = cm.state.doc.lineAt(headPos).number - 1;
+        this.replaceBlockWithColumns(blockIdx, columnCount, cursorLine0);
     }
 
-    replaceBlockWithColumns(blockIndex, columnCount) {
+    replaceBlockWithColumns(blockIndex, columnCount, cursorLine0) {
         const editor = this.activeView?.editor;
         const cmView = editor?.cm;
         const block = this.blocks[blockIndex];
@@ -2355,7 +2451,13 @@ class BlockDndPlugin extends obsidian.Plugin {
             blockStartLine = cmView.state.doc.lineAt(cmView.posAtDOM(firstEl)).number - 1;
             blockEndLine = cmView.state.doc.lineAt(cmView.posAtDOM(lastEl)).number - 1;
         } catch {
-            return;
+            // Embed widgets sometimes throw from posAtDOM — fall back to cursor line.
+            const fallback =
+                typeof cursorLine0 === 'number'
+                    ? cursorLine0
+                    : cmView.state.doc.lineAt(cmView.state.selection.main.head).number - 1;
+            blockStartLine = fallback;
+            blockEndLine = fallback;
         }
 
         const doc = cmView.state.doc;
@@ -2368,15 +2470,13 @@ class BlockDndPlugin extends obsidian.Plugin {
         let bodies;
 
         if (columnCount === 1) {
-            // Half-width row: image (or block) on the left, text on the right,
-            // top-aligned and inline — never stacked above/below each other.
-            const pair = resolveOneColumnPair(doc, blockStartLine, blockEndLine);
+            // Half-width row: image on the left, text on the right. Image-first
+            // scan so Live Preview embed widgets cannot drop the picture.
+            const pair = resolveOneColumnPair(doc, blockStartLine, blockEndLine, cursorLine0);
             from = pair.from;
             to = pair.to;
             let leftBody = pair.left;
             let rightBody = pair.right;
-            // Safety: if text slot still contains a wiki image, peel it out so the
-            // picture does not vanish into the raw text box (see user report).
             const rightMixed = splitMixedImageText(rightBody);
             if (rightMixed?.imageMd) {
                 if (!bodyLooksLikeImageOnly(leftBody)) leftBody = rightMixed.imageMd;
@@ -2396,9 +2496,12 @@ class BlockDndPlugin extends obsidian.Plugin {
             });
         }
 
+        const oldSlice = cmView.state.sliceDoc(from, to);
+        // Never delete a wiki image from the note without putting it in a column body.
+        bodies = bdndPreserveEmbedsInBodies(oldSlice, bodies);
+
         const meta = columnCount === 1 ? { id, n, widths, singleCol: true } : { id, n, widths };
         const inner = serializeColumnFence(meta, bodies);
-        const oldSlice = cmView.state.sliceDoc(from, to);
         let fence = wrapColumnFenceInner(inner, oldSlice.endsWith('\n'));
 
         // Land the CM cursor outside the fence so Live Preview renders the column

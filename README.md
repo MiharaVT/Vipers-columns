@@ -30,7 +30,7 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 3. Choose **Column** from the context menu
 4. Select **1 Column** through **5 Columns**
 
-**1 Column** makes a half-width row with the image on the left and a text box on the right, top-aligned beside the image (not above/below it). Works whether you right-click the image or the text next to it. Drag the bottom edge of the text box to grow it downward. Images are rendered directly in the left cell (they stay visible; double-click the image if you need to edit the raw embed). Click the text box to edit text.
+**1 Column** makes a half-width row with the image on the left and a text box on the right, top-aligned beside the image (not above/below it). Works whether you right-click the image or the text next to it. Drag the bottom edge of the text box to grow it downward. Images are resolved from the vault and kept in the left cell (they are never deleted from the note when creating columns). Double-click the image to edit the raw embed; click the text box to edit text.
 
 ### Drag and Drop (Desktop)
 
