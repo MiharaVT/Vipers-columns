@@ -80,6 +80,67 @@ function serializeColumnFence(meta, bodies) {
     return JSON.stringify(meta) + '\n' + bodies.join(COLUMN_BODY_SEP);
 }
 
+function columnBodiesEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (String(a[i] ?? '') !== String(b[i] ?? '')) return false;
+    }
+    return true;
+}
+
+function isColumnPlainEnterKey(e) {
+    return e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing;
+}
+
+function isColumnTabKey(e) {
+    return e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing;
+}
+
+/**
+ * Place the caret in a textarea near a click after mousedown preventDefault
+ * (which otherwise leaves the caret at the end / previous offset).
+ */
+function setTextareaCaretFromClick(ta, clientX, clientY) {
+    if (!(ta instanceof HTMLTextAreaElement) || typeof ta.setSelectionRange !== 'function') return;
+    try {
+        const rect = ta.getBoundingClientRect();
+        const style = window.getComputedStyle(ta);
+        const paddingLeft = parseFloat(style.paddingLeft) || 0;
+        const paddingTop = parseFloat(style.paddingTop) || 0;
+        const x = clientX - rect.left - paddingLeft + ta.scrollLeft;
+        const y = clientY - rect.top - paddingTop + ta.scrollTop;
+        const fontSize = parseFloat(style.fontSize) || 16;
+        const lineHeight = parseFloat(style.lineHeight) || fontSize * 1.5;
+        const line = Math.max(0, Math.floor(y / Math.max(1, lineHeight)));
+        const lines = String(ta.value || '').split('\n');
+        if (line >= lines.length) {
+            ta.setSelectionRange(ta.value.length, ta.value.length);
+            return;
+        }
+        const ctx2d = setTextareaCaretFromClick._ctx || (setTextareaCaretFromClick._ctx = document.createElement('canvas').getContext('2d'));
+        if (ctx2d) ctx2d.font = style.font || `${style.fontSize} ${style.fontFamily}`;
+        const text = lines[line];
+        let col = text.length;
+        if (ctx2d) {
+            for (let i = 0; i <= text.length; i++) {
+                const w = ctx2d.measureText(text.slice(0, i)).width;
+                if (w >= x) {
+                    const prev = i === 0 ? 0 : ctx2d.measureText(text.slice(0, i - 1)).width;
+                    col = x - prev < w - x ? Math.max(0, i - 1) : i;
+                    break;
+                }
+            }
+        }
+        col = Math.max(0, Math.min(text.length, col));
+        let abs = 0;
+        for (let i = 0; i < line; i++) abs += lines[i].length + 1;
+        abs += col;
+        ta.setSelectionRange(abs, abs);
+    } catch {
+        /* noop */
+    }
+}
+
 /**
  * Wiki embeds `![[path]]` / `![[path|316]]` / `![[path|316x200]]` / `![[path|alias]]`.
  * Pipe suffix may be dimensions or an alias — dimensions are parsed when numeric.
@@ -1245,9 +1306,6 @@ class BlockDndPlugin extends obsidian.Plugin {
     /** Deferred textarea focus timer — cleared on any pointerdown so main-note clicks are not overridden */
     columnFocusDeferTimer = null;
 
-    /** Cancel pending column textarea focus when focus moves elsewhere (e.g. Tab) without pointerdown */
-    columnFocusClearOnFocusIn = null;
-
     boundModifierKeySync = null;
     boundWindowBlurForModifiers = null;
 
@@ -1343,38 +1401,68 @@ class BlockDndPlugin extends obsidian.Plugin {
 
             const t = ev.target;
             if (!(t instanceof HTMLElement)) return;
-
+            if (!t.closest('.block-dnd-columns-embed, .block-dnd-columns-root')) return;
             if (t.closest('.block-dnd-col-gutter')) return;
+            if (t.closest('.zotion-resize-handle')) return;
+            if (ev.type === 'mousedown' && ev.defaultPrevented) return;
+
+            const wrapHit = t.closest('.block-dnd-col-editor-wrap');
+            if (wrapHit && wrapHit.classList.contains('image-preview-cell') && !t.closest('.block-dnd-col-editor')) {
+                // Let image cells handle click/dblclick; contenteditable=false keeps the fence closed.
+                return;
+            }
+
+            const alreadyEditing = t.closest('.block-dnd-col-editor');
+            if (alreadyEditing && document.activeElement === alreadyEditing) {
+                // Already in the cell — allow native click/drag text selection.
+                return;
+            }
+
+            // Prevent Live Preview from placing the caret inside the fence.
+            // That unmounts the column widget and the cell text appears to vanish.
+            if (ev.cancelable) ev.preventDefault();
 
             let targetTa = t.closest('.block-dnd-col-editor');
             if (!targetTa) {
                 const cell = t.closest('.block-dnd-col-cell');
-                if (cell) targetTa = cell.querySelector('.block-dnd-col-editor');
+                if (cell) targetTa = cell.querySelector(':scope > .block-dnd-col-editor-wrap:not(.image-preview-cell) .block-dnd-col-editor');
             }
             if (!(targetTa instanceof HTMLTextAreaElement)) return;
+
+            const editorWrap = targetTa.closest('.block-dnd-col-editor-wrap');
+            if (editorWrap) editorWrap.classList.add('is-editing');
+            const cell = targetTa.closest('.block-dnd-col-cell');
+            if (cell) cell.classList.add('is-editing-cell');
+
+            const clientX = ev.clientX;
+            const clientY = ev.clientY;
+            const clickedEditorDirectly = !!t.closest('.block-dnd-col-editor');
+            const root = targetTa.closest('.block-dnd-columns-root');
+            const fenceId = root?.dataset?.blockDndId;
 
             this.columnFocusDeferTimer = window.setTimeout(() => {
                 this.columnFocusDeferTimer = null;
                 try {
                     if (!document.contains(targetTa)) return;
-                    if (document.activeElement === targetTa) return;
+                    if (fenceId) this.keepCmCaretOutsideColumnFence(fenceId);
                     targetTa.focus({ preventScroll: true });
+                    if (clickedEditorDirectly && typeof clientX === 'number') {
+                        setTextareaCaretFromClick(targetTa, clientX, clientY);
+                    } else {
+                        const len = targetTa.value.length;
+                        try {
+                            targetTa.setSelectionRange(len, len);
+                        } catch {
+                            /* noop */
+                        }
+                    }
                 } catch {
                     /* noop */
                 }
             }, 0);
         };
         document.addEventListener('pointerdown', this.columnEditorFocusHack, true);
-
-        this.columnFocusClearOnFocusIn = (ev) => {
-            if (this.columnFocusDeferTimer === null) return;
-            const tar = ev.target;
-            if (!(tar instanceof HTMLElement)) return;
-            if (tar.classList.contains('block-dnd-col-editor')) return;
-            clearTimeout(this.columnFocusDeferTimer);
-            this.columnFocusDeferTimer = null;
-        };
-        document.addEventListener('focusin', this.columnFocusClearOnFocusIn, true);
+        document.addEventListener('mousedown', this.columnEditorFocusHack, true);
 
         this.boundModifierKeySync = (e) => this.onModifierKeyboardSync(e);
         this.boundWindowBlurForModifiers = () => this.clearModifierHoldState();
@@ -1399,11 +1487,8 @@ class BlockDndPlugin extends obsidian.Plugin {
         }
         if (this.columnEditorFocusHack) {
             document.removeEventListener('pointerdown', this.columnEditorFocusHack, true);
+            document.removeEventListener('mousedown', this.columnEditorFocusHack, true);
             this.columnEditorFocusHack = null;
-        }
-        if (this.columnFocusClearOnFocusIn) {
-            document.removeEventListener('focusin', this.columnFocusClearOnFocusIn, true);
-            this.columnFocusClearOnFocusIn = null;
         }
         this.cleanup();
         this.removeStyles();
@@ -1616,6 +1701,30 @@ class BlockDndPlugin extends obsidian.Plugin {
                 cursor: text;
                 -webkit-user-select: text;
                 user-select: text;
+            }
+
+            /* Explicitly undo the clipped 1px hide so text cannot vanish on click-to-edit */
+            .block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
+            .block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor {
+                position: relative !important;
+                width: 100% !important;
+                height: auto;
+                min-height: 3.2em !important;
+                margin: 0 !important;
+                padding: 6px 8px !important;
+                overflow: auto !important;
+                clip: auto !important;
+                clip-path: none !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                resize: vertical !important;
+                border: 1px solid var(--background-modifier-border);
+            }
+
+            .block-dnd-col-cell.is-editing-cell,
+            .block-dnd-col-editor-wrap.is-editing,
+            .block-dnd-col-editor-wrap.always-show-editor {
+                overflow: visible;
             }
 
             .block-dnd-columns-root .block-dnd-col-editor:focus {
@@ -2998,39 +3107,38 @@ class BlockDndPlugin extends obsidian.Plugin {
     }
 
     async flushColumnBodiesFromRoot(uuid, root, sourcePath) {
+        if (!root) return;
         const textareas = root.querySelectorAll('.block-dnd-col-editor');
         const newBodies = Array.from(textareas).map(t => t.value);
+        // A remount can fire blur on a torn-down widget with 0 textareas —
+        // never persist that, or column text is wiped.
+        if (!newBodies.length) return;
 
         const activeView = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
         const md =
             activeView?.file?.path === sourcePath ? activeView.editor?.getValue() : null;
 
+        let parsed;
         if (!md) {
             const file = this.app.vault.getAbstractFileByPath(sourcePath);
             if (!(file instanceof obsidian.TFile)) return;
             const diskMd = await this.app.vault.read(file);
             const range = findFenceRangeById(diskMd, uuid);
             if (!range) return;
-            const parsed = parseColumnFenceSource(range.inner);
-            if (!parsed) return;
-            const nCols = newBodies.length;
-            let w = (parsed.meta.widths || []).map(Number).filter(x => !Number.isNaN(x));
-            if (w.length !== nCols) w = equalWidthPercents(nCols);
-            w = normalizePercents(w);
-            const meta = {
-                ...parsed.meta,
-                id: uuid,
-                n: nCols,
-                widths: w
-            };
-            await this._persistColumnFence(sourcePath, meta, newBodies);
-            return;
+            parsed = parseColumnFenceSource(range.inner);
+        } else {
+            const range = findFenceRangeById(md, uuid);
+            if (!range) return;
+            parsed = parseColumnFenceSource(range.inner);
         }
-
-        const range = findFenceRangeById(md, uuid);
-        if (!range) return;
-        const parsed = parseColumnFenceSource(range.inner);
         if (!parsed) return;
+
+        if (parsed.meta.n && newBodies.length !== parsed.meta.n) return;
+
+        const hadContent = (parsed.bodies || []).some((b) => String(b || '').trim());
+        const allEmpty = newBodies.every((b) => !String(b || '').trim());
+        if (hadContent && allEmpty) return;
+        if (columnBodiesEqual(parsed.bodies, newBodies)) return;
 
         const nCols = newBodies.length;
         let w = (parsed.meta.widths || []).map(Number).filter(x => !Number.isNaN(x));
@@ -3052,12 +3160,68 @@ class BlockDndPlugin extends obsidian.Plugin {
         await this._persistColumnFence(sourcePath, meta, bodiesSnapshot, 'block-dnd.resize-col');
     }
 
+    keepCmCaretOutsideColumnFence(uuid, sourcePath) {
+        try {
+            const mv = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+            if (!mv?.editor?.cm) return;
+            if (sourcePath && mv.file?.path !== sourcePath) return;
+            const cm = mv.editor.cm;
+            const md = mv.editor.getValue();
+            const range = findFenceRangeById(md, uuid);
+            if (!range) return;
+            const head = cm.state.selection.main.head;
+            if (head >= range.from && head < range.to) {
+                const pos = Math.min(range.to, cm.state.doc.length);
+                cm.dispatch({
+                    selection: { anchor: pos, head: pos },
+                    userEvent: 'block-dnd.keep-outside-fence'
+                });
+            }
+        } catch {
+            /* noop */
+        }
+    }
+
+    async exitColumnEditToNote(uuid, root, sourcePath, opts = {}) {
+        const prevTimer = this.columnBodyPersistTimers.get(uuid);
+        if (prevTimer) clearTimeout(prevTimer);
+        this.columnBodyPersistTimers.delete(uuid);
+        try {
+            await this.flushColumnBodiesFromRoot(uuid, root, sourcePath);
+        } catch {
+            /* noop */
+        }
+        const mv = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+        if (!mv?.editor?.cm || mv.file?.path !== sourcePath) return;
+        const cm = mv.editor.cm;
+        const md = mv.editor.getValue();
+        const range = findFenceRangeById(md, uuid);
+        if (!range) {
+            cm.focus();
+            return;
+        }
+        let pos;
+        if (opts.before) {
+            pos = Math.max(0, range.from);
+        } else {
+            pos = Math.min(range.to, cm.state.doc.length);
+        }
+        cm.dispatch({
+            selection: { anchor: pos, head: pos },
+            userEvent: 'block-dnd.column-exit-tab'
+        });
+        cm.focus();
+    }
+
     async renderColumnCodeBlock(source, el, ctx) {
         el.innerHTML = '';
         el.classList.add('block-dnd-columns-embed');
         el.style.pointerEvents = 'auto';
         el.style.position = 'relative';
         el.style.zIndex = '6';
+        // Nested non-editable region so Live Preview does not put the caret
+        // inside the fence (which unmounts the widget and clears cell text).
+        el.setAttribute('contenteditable', 'false');
 
         const trimmed = source.replace(/\s+$/, '');
         const parsed = parseColumnFenceSource(trimmed);
@@ -3079,6 +3243,8 @@ class BlockDndPlugin extends obsidian.Plugin {
         const root = document.createElement('div');
         root.className = 'block-dnd-columns-root';
         root.dataset.blockDndId = meta.id;
+        if (ctx.sourcePath) root.dataset.sourcePath = ctx.sourcePath;
+        root.setAttribute('contenteditable', 'false');
         if (meta.singleCol) root.classList.add('block-dnd-single-col');
         el.appendChild(root);
 
@@ -3128,7 +3294,10 @@ class BlockDndPlugin extends obsidian.Plugin {
             // beside the image (drag the bottom edge to grow downward).
             // Image slots stay in preview mode so the picture does not "disappear"
             // into raw ![[...]] source on click.
-            const alwaysShowEditor = !!meta.singleCol && i > 0 && !imageOnly;
+            // Text cells always show a real textarea (same as 1 Column's side box).
+            // Preview-only click-to-edit hid the rendered text and often unmounted
+            // the widget, so the cell looked empty.
+            const alwaysShowEditor = !imageOnly;
             if (alwaysShowEditor) wrap.classList.add('always-show-editor');
             if (imageOnly) wrap.classList.add('image-preview-cell');
 
@@ -3168,8 +3337,10 @@ class BlockDndPlugin extends obsidian.Plugin {
             const enterEditMode = () => {
                 if (imageOnly) return;
                 wrap.classList.add('is-editing');
+                cell.classList.add('is-editing-cell');
             };
             const leaveEditMode = () => {
+                cell.classList.remove('is-editing-cell');
                 if (alwaysShowEditor) return;
                 wrap.classList.remove('is-editing');
             };
@@ -3220,48 +3391,21 @@ class BlockDndPlugin extends obsidian.Plugin {
                     ta.blur();
                     return;
                 }
-                if (e.key !== 'Enter' || e.shiftKey) return;
-                if (e.ctrlKey || e.metaKey || e.altKey) return;
-                if (e.isComposing) return;
-                e.preventDefault();
-                e.stopPropagation();
-                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-                const list = root.querySelectorAll('.block-dnd-col-editor');
-                const idx = Array.prototype.indexOf.call(list, ta);
-                if (idx < 0) return;
-                if (idx < list.length - 1) {
-                    const next = list[idx + 1];
-                    if (next instanceof HTMLTextAreaElement) {
-                        const nextWrap = next.closest('.block-dnd-col-editor-wrap');
-                        if (nextWrap) nextWrap.classList.add('is-editing');
-                        next.focus({ preventScroll: true });
-                    }
+                if (isColumnTabKey(e)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+                    void this.exitColumnEditToNote(meta.id, root, ctx.sourcePath, {
+                        before: !!e.shiftKey,
+                    });
+                    leaveEditMode();
                     return;
                 }
-                const prevTimer = this.columnBodyPersistTimers.get(meta.id);
-                if (prevTimer) clearTimeout(prevTimer);
-                this.columnBodyPersistTimers.delete(meta.id);
-                void (async () => {
-                    try {
-                        await this.flushColumnBodiesFromRoot(meta.id, root, ctx.sourcePath);
-                        leaveEditMode();
-                        const mv = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
-                        if (!mv?.editor?.cm || mv.file?.path !== ctx.sourcePath) return;
-                        const cm = mv.editor.cm;
-                        const md = mv.editor.getValue();
-                        const range = findFenceRangeById(md, meta.id);
-                        if (!range) return;
-                        const insertAt = Math.min(range.to, cm.state.doc.length);
-                        cm.dispatch({
-                            changes: { from: insertAt, to: insertAt, insert: '\n\n' },
-                            selection: { anchor: insertAt + 2, head: insertAt + 2 },
-                            userEvent: 'block-dnd.column-exit-enter'
-                        });
-                        cm.focus();
-                    } catch {
-                        /* noop */
-                    }
-                })();
+                if (isColumnPlainEnterKey(e)) {
+                    // Keep Enter inside the textarea (newline). Do not preventDefault.
+                    e.stopPropagation();
+                    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+                }
             }, true);
 
             ta.addEventListener('input', () => {
@@ -3645,3 +3789,8 @@ class BlockDndSettingTab extends obsidian.PluginSettingTab {
 }
 
 module.exports = BlockDndPlugin;
+BlockDndPlugin._columnEditTest = {
+    columnBodiesEqual,
+    isColumnPlainEnterKey,
+    isColumnTabKey,
+};
