@@ -30,6 +30,24 @@
     min-width: 0;
 }
 
+.block-dnd-col-cell.is-editing-cell,
+.block-dnd-col-editor-wrap.is-editing,
+.block-dnd-col-editor-wrap.always-show-editor {
+    overflow: visible;
+}
+
+.block-dnd-col-editor-wrap.is-editing .block-dnd-col-editor,
+.block-dnd-col-editor-wrap.always-show-editor .block-dnd-col-editor {
+    position: relative;
+    width: 100%;
+    min-height: 3.2em;
+    overflow: auto;
+    clip: auto;
+    clip-path: none;
+    opacity: 1;
+    pointer-events: auto;
+}
+
 .block-dnd-col-preview img,
 .block-dnd-col-preview .block-dnd-col-direct-img,
 .block-dnd-col-preview .internal-embed,
