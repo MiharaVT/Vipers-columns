@@ -31,13 +31,14 @@
 }
 
 .block-dnd-col-preview img,
+.block-dnd-col-preview .block-dnd-col-direct-img,
 .block-dnd-col-preview .internal-embed,
 .block-dnd-col-preview .image-embed,
 .block-dnd-col-preview .media-embed {
     display: block !important;
     position: relative !important;
     max-width: 100% !important;
-    width: 100% !important;
+    width: auto !important;
     height: auto !important;
     float: none !important;
     vertical-align: top;
