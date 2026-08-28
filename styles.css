@@ -10,9 +10,22 @@
     pointer-events: auto;
 }
 
-/* Column editors rendered by Live Preview (markdown fences) */
-.block-dnd-col-editor {
+/* Column editors / previews rendered by Live Preview (markdown fences) */
+.block-dnd-col-editor,
+.block-dnd-col-preview {
     box-sizing: border-box;
+}
+
+.block-dnd-col-cell {
+    justify-content: flex-start;
+}
+
+.block-dnd-col-preview img,
+.block-dnd-col-preview .internal-embed,
+.block-dnd-col-preview .image-embed {
+    max-width: 100%;
+    height: auto;
+    vertical-align: top;
 }
 
 .block-dnd-columns-root:focus-within {

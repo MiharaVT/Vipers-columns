@@ -340,7 +340,11 @@ function bdndAttachColumnZotionCompat(ctx) {
         while (previewEl.firstChild) previewEl.firstChild.remove();
         removeOverlay();
         try {
-            await obsidian.MarkdownRenderer.renderMarkdown(md, previewEl, sourcePath, markdownChild);
+            if (typeof obsidian.MarkdownRenderer.render === 'function') {
+                await obsidian.MarkdownRenderer.render(app, md, previewEl, sourcePath, markdownChild);
+            } else {
+                await obsidian.MarkdownRenderer.renderMarkdown(md, previewEl, sourcePath, markdownChild);
+            }
         } catch {
             const doc = previewEl.ownerDocument ?? document;
             const dv = doc.createElement('div');
@@ -570,6 +574,44 @@ function bdndAttachColumnZotionCompat(ctx) {
     }
 
     void rebuildPreview();
+}
+
+/**
+ * After a "1 Column" wrap, find a simple following paragraph to place in the
+ * right half so text sits at the top next to an image/embed.
+ * Skips at most one blank line. Returns null if the next content is not plain text.
+ */
+function findFollowingSideParagraph(doc, blockEndLine0) {
+    let line0 = blockEndLine0 + 1;
+    let skippedBlank = false;
+    while (line0 < doc.lines) {
+        const line = doc.line(line0 + 1);
+        const raw = line.text;
+        const t = raw.trim();
+        if (!t) {
+            if (skippedBlank) return null;
+            skippedBlank = true;
+            line0++;
+            continue;
+        }
+        if (
+            t.startsWith('```') ||
+            t.startsWith('#') ||
+            t.startsWith('>') ||
+            t.startsWith('|') ||
+            t.startsWith('- ') ||
+            t.startsWith('* ') ||
+            t.startsWith('+ ') ||
+            /^\d+\.\s/.test(t) ||
+            t.startsWith('![') ||
+            t.startsWith('![[') ||
+            /^!\[\[/.test(t)
+        ) {
+            return null;
+        }
+        return { text: raw, line0, line };
+    }
+    return null;
 }
 
 /** Full fence string; match trailing newline of replaced span so content below does not shift. */
@@ -931,6 +973,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                 display: flex;
                 flex-direction: column;
                 align-items: stretch;
+                justify-content: flex-start;
             }
 
             .block-dnd-col-editor-wrap {
@@ -939,8 +982,59 @@ class BlockDndPlugin extends obsidian.Plugin {
                 gap: 6px;
                 width: 100%;
                 min-width: 0;
+                position: relative;
             }
 
+            .block-dnd-columns-root .block-dnd-col-preview {
+                display: block;
+                width: 100%;
+                min-height: 3.2em;
+                margin: 0;
+                padding: 4px 0;
+                box-sizing: border-box;
+                font-family: var(--font-text-theme);
+                font-size: var(--font-text-size);
+                line-height: var(--line-height-normal);
+                color: var(--text-normal);
+                cursor: text;
+                pointer-events: auto !important;
+            }
+
+            .block-dnd-columns-root .block-dnd-col-preview > :first-child {
+                margin-top: 0;
+            }
+
+            .block-dnd-columns-root .block-dnd-col-preview img,
+            .block-dnd-columns-root .block-dnd-col-preview .internal-embed,
+            .block-dnd-columns-root .block-dnd-col-preview .image-embed {
+                max-width: 100%;
+                height: auto;
+                vertical-align: top;
+            }
+
+            .block-dnd-columns-root .block-dnd-col-preview p {
+                margin-block-start: 0;
+                margin-block-end: 0.5em;
+            }
+
+            .block-dnd-col-editor-wrap:not(.is-editing) .block-dnd-col-editor {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                min-height: 0;
+                margin: -1px;
+                padding: 0;
+                overflow: hidden;
+                clip: rect(0, 0, 0, 0);
+                border: 0;
+                opacity: 0;
+                pointer-events: none;
+                resize: none;
+            }
+
+            .block-dnd-col-editor-wrap.is-editing .block-dnd-col-preview {
+                display: none;
+            }
 
             .block-dnd-columns-root .block-dnd-col-editor {
                 display: block;
@@ -2054,35 +2148,42 @@ class BlockDndPlugin extends obsidian.Plugin {
 
         const doc = cmView.state.doc;
         const from = doc.line(blockStartLine + 1).from;
-        const to = doc.line(blockEndLine + 1).to;
+        let to = doc.line(blockEndLine + 1).to;
         const extracted = cmView.state.sliceDoc(from, to);
 
+        // "1 Column" = half-width layout (2 slots). Put the selected block on the
+        // left; if the next simple paragraph is beside it in the note, pull that
+        // text into the right column so it sits at the top next to images/embeds.
+        let sideText = '';
+        if (columnCount === 1) {
+            const side = findFollowingSideParagraph(doc, blockEndLine);
+            if (side) {
+                sideText = side.text;
+                to = side.line.to;
+            }
+        }
+
         const id = randomBlockId();
-        // "1 Column" means a half-width block on the left with the right half empty
-        // for regular note content — so it physically creates 2 columns with one body.
         const n = columnCount === 1 ? 2 : columnCount;
         const widths = equalWidthPercents(n);
         const bodies = Array.from({ length: n }, (_, i) => {
             if (i === 0) return extracted;
-            return columnCount === 1 ? '' : `_Column ${i + 1}_`;
+            if (columnCount === 1) return sideText;
+            return `_Column ${i + 1}_`;
         });
         const meta = columnCount === 1 ? { id, n, widths, singleCol: true } : { id, n, widths };
         const inner = serializeColumnFence(meta, bodies);
         const oldSlice = cmView.state.sliceDoc(from, to);
         let fence = wrapColumnFenceInner(inner, oldSlice.endsWith('\n'));
 
-        // We MUST land the CM cursor on a line OUTSIDE the fence; otherwise Live
-        // Preview shows the raw source instead of rendering the column widget
-        // (the "read-only CSS editor" appearance the user reported).
-        // Ensure there is at least one newline after the fence, then place the
-        // cursor on the line directly below the closing ```.
+        // Land the CM cursor outside the fence so Live Preview renders the column
+        // widget (with markdown preview) instead of showing raw fence source.
         const charAfterTo = cmView.state.doc.sliceString(to, Math.min(to + 1, cmView.state.doc.length));
         const needsTrailingNewline = !fence.endsWith('\n') && charAfterTo !== '\n';
         let insertText = fence;
         if (needsTrailingNewline) {
             insertText = fence + '\n';
         }
-        // Position one char past the closing ``` line (i.e. start of next line).
         const cursorBelowFence = from + (fence.endsWith('\n') ? fence.length : fence.length + 1);
 
         cmView.dispatch({
@@ -2091,40 +2192,9 @@ class BlockDndPlugin extends obsidian.Plugin {
             userEvent: 'block-dnd.columns'
         });
 
+        // Do not auto-focus the column textarea — that forced raw ![[...]] source
+        // into view. Preview mode shows the rendered image with text beside it.
         setTimeout(() => this.forceRender(), 60);
-
-        // Poll for the column textarea to appear (the LP widget is created
-        // asynchronously by registerMarkdownCodeBlockProcessor), then focus it.
-        let _focusDone = false;
-        let _focusAttempts = 0;
-        const _doColumnFocus = () => {
-            if (_focusDone || _focusAttempts > 60) return;
-            _focusAttempts++;
-            const colRoot = document.querySelector(`[data-block-dnd-id="${id}"]`);
-            const firstTa = colRoot?.querySelector('.block-dnd-col-editor');
-            if (firstTa instanceof HTMLTextAreaElement) {
-                _focusDone = true;
-                try { cmView.contentDOM.blur(); } catch { /* noop */ }
-                firstTa.focus({ preventScroll: true });
-                try { firstTa.setSelectionRange(firstTa.value.length, firstTa.value.length); } catch { /* noop */ }
-                // Re-assert focus a couple of times in case Obsidian's menu teardown steals it back.
-                setTimeout(() => {
-                    if (document.contains(firstTa) && document.activeElement !== firstTa) {
-                        try { cmView.contentDOM.blur(); } catch { /* noop */ }
-                        firstTa.focus({ preventScroll: true });
-                    }
-                }, 50);
-                setTimeout(() => {
-                    if (document.contains(firstTa) && document.activeElement !== firstTa) {
-                        try { cmView.contentDOM.blur(); } catch { /* noop */ }
-                        firstTa.focus({ preventScroll: true });
-                    }
-                }, 200);
-                return;
-            }
-            setTimeout(_doColumnFocus, 30);
-        };
-        _doColumnFocus();
     }
 
     async _persistColumnFence(sourcePath, meta, bodies, userEvent = 'block-dnd.column-edit') {
@@ -2283,12 +2353,48 @@ class BlockDndPlugin extends obsidian.Plugin {
             wrap.className = 'block-dnd-col-editor-wrap';
             cell.appendChild(wrap);
 
+            const previewEl = document.createElement('div');
+            previewEl.className = 'block-dnd-col-preview markdown-rendered';
+
             const ta = document.createElement('textarea');
             ta.className = 'block-dnd-col-editor';
             ta.value = bodies[i] ?? '';
             ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
             ta.spellcheck = true;
             ta.autocomplete = 'off';
+            ta.setAttribute('aria-label', `Column ${i + 1}`);
+
+            const markdownChild = new obsidian.MarkdownRenderChild(previewEl);
+            if (typeof ctx.addChild === 'function') {
+                ctx.addChild(markdownChild);
+            } else if (typeof this.addChild === 'function') {
+                this.addChild(markdownChild);
+            }
+
+            const enterEditMode = () => {
+                wrap.classList.add('is-editing');
+            };
+            const leaveEditMode = () => {
+                wrap.classList.remove('is-editing');
+            };
+
+            previewEl.addEventListener('pointerdown', (e) => {
+                e.stopPropagation();
+            });
+            previewEl.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+            });
+            previewEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                enterEditMode();
+                ta.focus({ preventScroll: true });
+                try {
+                    const len = ta.value.length;
+                    ta.setSelectionRange(len, len);
+                } catch {
+                    /* noop */
+                }
+            });
 
             ta.addEventListener('pointerdown', (e) => {
                 e.stopPropagation();
@@ -2299,8 +2405,17 @@ class BlockDndPlugin extends obsidian.Plugin {
             ta.addEventListener('click', (e) => {
                 e.stopPropagation();
             });
+            ta.addEventListener('focus', () => {
+                enterEditMode();
+            });
 
             ta.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    ta.blur();
+                    return;
+                }
                 if (e.key !== 'Enter' || e.shiftKey) return;
                 if (e.ctrlKey || e.metaKey || e.altKey) return;
                 if (e.isComposing) return;
@@ -2312,7 +2427,11 @@ class BlockDndPlugin extends obsidian.Plugin {
                 if (idx < 0) return;
                 if (idx < list.length - 1) {
                     const next = list[idx + 1];
-                    if (next instanceof HTMLTextAreaElement) next.focus({ preventScroll: true });
+                    if (next instanceof HTMLTextAreaElement) {
+                        const nextWrap = next.closest('.block-dnd-col-editor-wrap');
+                        if (nextWrap) nextWrap.classList.add('is-editing');
+                        next.focus({ preventScroll: true });
+                    }
                     return;
                 }
                 const prevTimer = this.columnBodyPersistTimers.get(meta.id);
@@ -2321,6 +2440,7 @@ class BlockDndPlugin extends obsidian.Plugin {
                 void (async () => {
                     try {
                         await this.flushColumnBodiesFromRoot(meta.id, root, ctx.sourcePath);
+                        leaveEditMode();
                         const mv = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
                         if (!mv?.editor?.cm || mv.file?.path !== ctx.sourcePath) return;
                         const cm = mv.editor.cm;
@@ -2348,13 +2468,28 @@ class BlockDndPlugin extends obsidian.Plugin {
                 if (prev) clearTimeout(prev);
                 this.columnBodyPersistTimers.delete(meta.id);
                 void this.flushColumnBodiesFromRoot(meta.id, root, ctx.sourcePath);
+                window.setTimeout(() => {
+                    if (document.activeElement !== ta) leaveEditMode();
+                }, 0);
             });
 
             ta.addEventListener('input', () => {
                 ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
             });
 
+            wrap.appendChild(previewEl);
             wrap.appendChild(ta);
+
+            bdndAttachColumnZotionCompat({
+                app: this.app,
+                sourcePath: ctx.sourcePath,
+                ta,
+                previewEl,
+                markdownChild,
+                refreshRows: () => {
+                    ta.rows = Math.min(14, Math.max(3, (ta.value || '').split('\n').length));
+                },
+            });
 
             if (i < n - 1) {
                 const gutterEl = document.createElement('div');

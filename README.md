@@ -30,6 +30,8 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 3. Choose **Column** from the context menu
 4. Select **1 Column** through **5 Columns**
 
+**1 Column** makes the selected block half-width (two slots). The block stays on the left; a simple paragraph on the next line (for example text under an image) is placed in the right slot so it sits at the top beside the image. Column cells show a rendered preview (images stay images); click a cell to edit the markdown.
+
 ### Drag and Drop (Desktop)
 
 1. Open any note in edit mode
