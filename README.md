@@ -4,11 +4,10 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 
 ## Features
 
-- 🖱️ **Drag and Drop Blocks** - Move paragraphs, headings, lists, and code blocks by dragging
 - 📐 **Column Layouts** - Right-click any block → Column → choose 1–5 Columns
-- 👆 **Notion-style Handles** - Hover over any line to reveal the drag handle
-- 📱 **Mobile Support** - Full touch support for mobile devices with long-press to drag
-- ⚡ **Smooth Animations** - Polished visual feedback during drag operations
+- 🖱️ **Optional block drag handles** - Notion-style ⋮⋮ handles (off by default; enable in settings)
+- 📱 **Mobile Support** - Columns work on mobile; optional long-press drag when handles are enabled
+- ⚡ **Smooth Animations** - Polished visual feedback during drag operations (when enabled)
 - 🎯 **Precise Positioning** - Visual drop indicator shows exactly where your block will land
 
 ## Installation
@@ -34,7 +33,9 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 
 **2–5 Columns** each show a text box you can click into. Column panels are fully transparent; the vertical gutter between columns stays available to drag-resize. **Enter** always inserts a new line inside that column (it never leaves the panel). **Tab** leaves the column and puts the cursor in the rest of the note (below the columns). **Shift+Tab** leaves the column and puts the cursor above it.
 
-### Drag and Drop (Desktop)
+### Drag and Drop (Desktop, optional)
+
+Block drag handles are **off by default**. Turn on **Enable block drag handles** in settings, then:
 
 1. Open any note in edit mode
 2. Hold **Alt** (configurable) and hover over any line to reveal the drag handle (⋮⋮) on the left
@@ -43,12 +44,11 @@ A plugin for Obsidian that enables column layouts via right-click, plus Notion-s
 
 ### Mobile
 
-1. Long-press on any line to select it
-2. Drag your finger to move the block
-3. Release to drop it at the new position
+Columns work from the right-click / context menu. If block drag handles are enabled: long-press a line, drag, and release to drop.
 
 ## Settings
 
+- **Enable block drag handles** - Show the ⋮⋮ handles for moving text blocks (default: **off**)
 - **Hold to show block handles** - Modifier key required to reveal drag handles (Alt / Ctrl / Win / Shift)
 - **Always show handles on mobile** - Show handles without a modifier key on touch devices
 - **Show handle on hover** - Toggle whether drag handles appear on hover (default: enabled)

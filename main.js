@@ -28,6 +28,11 @@ function readRevealModifierHeld(e, modifierSetting) {
 }
 
 const DEFAULT_SETTINGS = {
+    /**
+     * When false, Notion-style block drag handles (⋮⋮) never appear.
+     * Column layouts still work via the right-click menu.
+     */
+    enableBlockDragHandles: false,
     showHandleOnHover: true,
     /** One of: alt | control | meta | shift */
     handleRevealModifier: 'alt',
@@ -1714,6 +1719,9 @@ class BlockDndPlugin extends obsidian.Plugin {
         if (typeof this.settings.showColumnEditButton !== 'boolean') {
             this.settings.showColumnEditButton = DEFAULT_SETTINGS.showColumnEditButton;
         }
+        if (typeof this.settings.enableBlockDragHandles !== 'boolean') {
+            this.settings.enableBlockDragHandles = DEFAULT_SETTINGS.enableBlockDragHandles;
+        }
     }
 
     async saveSettings() {
@@ -2155,6 +2163,7 @@ class BlockDndPlugin extends obsidian.Plugin {
     }
 
     shouldRevealHandles() {
+        if (!this.settings.enableBlockDragHandles) return false;
         if (this.isMobile) {
             return !!this.settings.alwaysShowHandlesMobile;
         }
@@ -2229,6 +2238,12 @@ class BlockDndPlugin extends obsidian.Plugin {
     }
 
     setup() {
+        // Drag handles are optional — columns work without them via right-click.
+        if (!this.settings.enableBlockDragHandles) {
+            this.cleanup();
+            return;
+        }
+
         const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
         if (!view) return;
         
@@ -2484,6 +2499,7 @@ class BlockDndPlugin extends obsidian.Plugin {
         if (this.debounceTimeout) clearTimeout(this.debounceTimeout);
         this.isHovering = false;
         this.selectedBlockIndex = null;
+        if (!this.settings.enableBlockDragHandles) return;
         this.renderHandles();
     }
 
@@ -4060,50 +4076,67 @@ class BlockDndSettingTab extends obsidian.PluginSettingTab {
         containerEl.createEl('h2', { text: 'Viper\'s Columns' });
 
         new obsidian.Setting(containerEl)
-            .setName('Hold to show block handles')
+            .setName('Enable block drag handles')
             .setDesc(
-                'On desktop, drag handles only appear while this modifier is held (together with hovering a block, unless disabled below). Right‑click in the note editor and choose Column → 1–5 Columns to insert a column layout. Detection uses Alt/Ctrl/Win/Shift flags; on Windows, Alt can activate the menu bar — prefer Ctrl or Win/Cmd.'
+                'Show the ⋮⋮ drag handles for moving text blocks (Notion-style). Off by default — column layouts still work from the right-click Column menu.'
             )
-            .addDropdown((dropdown) =>
-                dropdown
-                    .addOption('alt', 'Alt')
-                    .addOption('control', 'Ctrl')
-                    .addOption('meta', 'Win / Command')
-                    .addOption('shift', 'Shift')
-                    .setValue(this.plugin.settings.handleRevealModifier || 'alt')
-                    .onChange(async (value) => {
-                        this.plugin.settings.handleRevealModifier = value;
+            .addToggle((toggle) =>
+                toggle.setValue(!!this.plugin.settings.enableBlockDragHandles).onChange(async (value) => {
+                    this.plugin.settings.enableBlockDragHandles = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.cleanup();
+                    setTimeout(() => this.plugin.setup(), 50);
+                    this.display();
+                })
+            );
+
+        if (this.plugin.settings.enableBlockDragHandles) {
+            new obsidian.Setting(containerEl)
+                .setName('Hold to show block handles')
+                .setDesc(
+                    'On desktop, drag handles only appear while this modifier is held (together with hovering a block, unless disabled below). Right‑click in the note editor and choose Column → 1–5 Columns to insert a column layout. Detection uses Alt/Ctrl/Win/Shift flags; on Windows, Alt can activate the menu bar — prefer Ctrl or Win/Cmd.'
+                )
+                .addDropdown((dropdown) =>
+                    dropdown
+                        .addOption('alt', 'Alt')
+                        .addOption('control', 'Ctrl')
+                        .addOption('meta', 'Win / Command')
+                        .addOption('shift', 'Shift')
+                        .setValue(this.plugin.settings.handleRevealModifier || 'alt')
+                        .onChange(async (value) => {
+                            this.plugin.settings.handleRevealModifier = value;
+                            await this.plugin.saveSettings();
+                            this.plugin.clearModifierHoldState();
+                            this.plugin.forceRender();
+                        })
+                );
+
+            new obsidian.Setting(containerEl)
+                .setName('Always show handles on mobile')
+                .setDesc(
+                    'When off, block handles are hidden on phones/tablets (there is no modifier hold). When on, handles behave like before.'
+                )
+                .addToggle((toggle) =>
+                    toggle.setValue(!!this.plugin.settings.alwaysShowHandlesMobile).onChange(async (value) => {
+                        this.plugin.settings.alwaysShowHandlesMobile = value;
                         await this.plugin.saveSettings();
-                        this.plugin.clearModifierHoldState();
                         this.plugin.forceRender();
                     })
-            );
+                );
 
-        new obsidian.Setting(containerEl)
-            .setName('Always show handles on mobile')
-            .setDesc(
-                'When off, block handles are hidden on phones/tablets (there is no modifier hold). When on, handles behave like before.'
-            )
-            .addToggle((toggle) =>
-                toggle.setValue(!!this.plugin.settings.alwaysShowHandlesMobile).onChange(async (value) => {
-                    this.plugin.settings.alwaysShowHandlesMobile = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.forceRender();
-                })
-            );
-
-        new obsidian.Setting(containerEl)
-            .setName('Show handle on hover')
-            .setDesc(
-                'When on (desktop), handles fade in when the pointer enters the block; still requires holding the modifier above. Does not apply when always showing on mobile.'
-            )
-            .addToggle((toggle) =>
-                toggle.setValue(this.plugin.settings.showHandleOnHover).onChange(async (value) => {
-                    this.plugin.settings.showHandleOnHover = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.forceRender();
-                })
-            );
+            new obsidian.Setting(containerEl)
+                .setName('Show handle on hover')
+                .setDesc(
+                    'When on (desktop), handles fade in when the pointer enters the block; still requires holding the modifier above. Does not apply when always showing on mobile.'
+                )
+                .addToggle((toggle) =>
+                    toggle.setValue(this.plugin.settings.showHandleOnHover).onChange(async (value) => {
+                        this.plugin.settings.showHandleOnHover = value;
+                        await this.plugin.saveSettings();
+                        this.plugin.forceRender();
+                    })
+                );
+        }
 
         new obsidian.Setting(containerEl)
             .setName('Show column source edit button')
