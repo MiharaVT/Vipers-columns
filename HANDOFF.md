@@ -1,12 +1,12 @@
 # Handoff: Viper's Columns (MiharaVT/Vipers-columns)
 
-**Status:** Working as of 2026-08-28. User confirmed **1 Column** keeps the image visible beside the text box after v1.0.5. **v1.0.6**–**v1.0.9** cover editing/keyboard/transparency. **v1.0.10** adds a setting to show/hide Obsidian’s `</>` edit button on column blocks only.
+**Status:** Working as of 2026-08-28. User confirmed **1 Column** keeps the image visible beside the text box after v1.0.5. **v1.0.6**–**v1.0.10** cover editing/keyboard/transparency/edit-button. **v1.0.11** turns off block drag handles by default (columns still work via right-click).
 
 **Repo:** https://github.com/MiharaVT/Vipers-columns  
-**Default branch:** `main` (PRs #1–#11 merged; edit-button toggle lands as **PR #12**)  
+**Default branch:** `main` (PRs #1–#12 merged; disable drag handles lands as **PR #13**)  
 **Plugin id:** `vipers-columns`  
 **Display name:** Viper's Columns  
-**Current version:** `1.0.10` (`manifest.json`)
+**Current version:** `1.0.11` (`manifest.json`)
 
 ---
 
@@ -39,6 +39,7 @@ Files: `main.js`, `manifest.json`, `styles.css` (`data.json` is optional default
 | [#10](https://github.com/MiharaVT/Vipers-columns/pull/10) | **1.0.8** | Column panels always use the translucent glass look (not only on hover) |
 | [#11](https://github.com/MiharaVT/Vipers-columns/pull/11) | **1.0.9** | Fully transparent panels; Enter stays in the column (no remount kick-out) |
 | [#12](https://github.com/MiharaVT/Vipers-columns/pull/12) | **1.0.10** | Setting to show/hide Obsidian `</>` edit button on columns only |
+| [#13](https://github.com/MiharaVT/Vipers-columns/pull/13) | **1.0.11** | Block drag handles off by default (`enableBlockDragHandles`) |
 
 ---
 
@@ -107,7 +108,7 @@ Do not restore Enter-to-next-column / Enter-to-exit-fence.
 ## Conventions for future agents
 
 1. **Always open the next PR** when editing this existing repo. If the last PR was `#N`, ship the update as `#N+1` (new branch from `main`). See `.cursor/skills/always-open-pr/SKILL.md`.
-2. **Bump `manifest.json` version on every plugin code PR** (next plugin bump would be `1.0.11`).
+2. **Bump `manifest.json` version on every plugin code PR** (next plugin bump would be `1.0.12`).
 3. New work: branch `cursor/<descriptive-name>-150f` (or the suffix this run specifies) off `main`.
 4. Do not rebrand as Zotion; product name is **Viper's Columns** / id `vipers-columns`.
 5. Do not leave handoffs only in an agent store — put them in the repo and open a PR.
